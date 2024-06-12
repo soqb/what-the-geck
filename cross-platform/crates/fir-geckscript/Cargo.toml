@@ -11,7 +11,7 @@ thiserror = "1.0.40"
 unicase = "2.6.0"
 nv-types = { path = "../nv-types" }
 anyhow = "1.0.70"
-rust-sitter = { path = "../../../rust-sitter/runtime" }
+rust-sitter = { path = "../../../../rust-sitter/runtime" }
 fir = { "path" = "../fir" }
 itertools = "0.11.0"
 lazy_static = "1.4.0"
@@ -26,7 +26,7 @@ colored = "2.1.0"
 default = []
 
 [build-dependencies]
-xtask = { path = "../xtask" }
+xtask = { path = "../../xtask" }
 anyhow = "1.0.70"
 
 [dev-dependencies]

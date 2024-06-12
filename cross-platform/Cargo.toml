@@ -2,13 +2,14 @@
 resolver = "2"
 
 members = [
-    "fir",
-    "fir-wasm",
-    "fir-nvse",
-    "fir-geckscript",
-    "psyker",
-    "nvlsp",
-    "nv-types",
+    "crates/fir",
+    "crates/fir-wasm",
+    "crates/fir-nvse",
+    "crates/fir-geckscript",
+    "crates/psyker",
+    "crates/nvlsp",
+    "crates/nv-types",
+    "xtask",
 ]
 exclude = [
     "win32",

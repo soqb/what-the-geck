@@ -17,7 +17,7 @@ fir-nvse = { path = "../fir-nvse" }
 fir = { path = "../fir" }
 serde = "1.0.163"
 serde_json = "1.0.96"
-rust-sitter = { path = "../../../rust-sitter/runtime" }
+rust-sitter = { path = "../../../../rust-sitter/runtime" }
 thiserror = "1.0.56"
 selfref = "0.4.3"
 rand = "0.8.5"
