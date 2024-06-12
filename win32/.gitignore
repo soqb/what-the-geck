@@ -1,0 +1,6 @@
+**/target
+**/.vscode
+**/.cache
+**/node_modules
+**/*.dll
+**/*.o

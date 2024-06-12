@@ -1,0 +1,20 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.75"
+cc = "1.0.83"
+clap = { version = "4.4.0", features = ["derive"] }
+regex = "1.10.2"
+rust-sitter-tool = { version = "0.3.4", default-features = false, path = "../../../rust-sitter/tool" }
+serde = "1.0.195"
+serde_derive = "1.0.195"
+serde_json = "1.0.105"
+tempfile = "3.8.0"
+thiserror = "1.0.47"
+tree-sitter = { version = "0.20.10", path = "../../../tree-sitter/lib" }
+tree-sitter-cli = { version = "0.20.8", path = "../../../tree-sitter/cli" }

@@ -1,0 +1,23 @@
+[package]
+name = "fir"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.75"
+arrayvec = "0.7.4"
+ascii = "1.1.0"
+enumflags2 = "0.7.8"
+hashbrown = "0.14.0"
+indexmap = "2.0.0"
+lazy_static = "1.4.0"
+miette = "5.10.0"
+nv-types = { version = "0.1.0", path = "../nv-types" }
+thiserror = "1.0.47"
+triomphe = "0.1.9"
+unicase = "2.7.0"
+wasm-encoder = "0.32.0"
+wasmparser = "0.112.0"
+slotmap = "1.0.7"

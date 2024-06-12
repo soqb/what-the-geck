@@ -1,0 +1,15 @@
+[package]
+name = "nvse-sys"
+version = "0.1.0"
+edition = "2021"
+
+[build-dependencies]
+anyhow = "1"
+
+[dependencies]
+encoding_rs = "0.8.34"
+
+[features]
+default = ["runtime"]
+runtime = []
+editor = []

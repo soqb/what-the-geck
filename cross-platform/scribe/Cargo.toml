@@ -1,0 +1,22 @@
+[package]
+name = "scribe"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+binrw = "0.13.3"
+bitflags = { version = "2.5.0", features = ["bytemuck"] }
+bytemuck = "1.16.0"
+flate2 = { version = "1.0.24", default-features = false, features = ["zlib-ng"] }
+unicase = "2.7.0"
+path-slash = "0.2.1"
+
+[dev-dependencies]
+argh = "0.1.12"
+anyhow = "1"
+
+[features]
+default = ["v001", "v104", "v105"]
+v001 = []
+v104 = []
+v105 = []

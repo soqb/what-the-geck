@@ -1,0 +1,26 @@
+[package]
+name = "nvlsp"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.71"
+crossbeam-channel = "0.5.8"
+env_logger = "0.10.0"
+hashbrown = "0.13.2"
+log = { version = "0.4.17", features = ["std"] }
+tower-lsp = { version = "0.20.0" }
+lsp-types = "0.94.0"
+miette = "5.9.0"
+fir-geckscript = { path = "../fir-geckscript" }
+fir-nvse = { path = "../fir-nvse" }
+fir = { path = "../fir" }
+serde = "1.0.163"
+serde_json = "1.0.96"
+rust-sitter = { path = "../../../rust-sitter/runtime" }
+thiserror = "1.0.56"
+selfref = "0.4.3"
+rand = "0.8.5"
+
+[profile.dev.package.psyker]
+opt-level = 3

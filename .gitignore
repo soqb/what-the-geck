@@ -1,0 +1,5 @@
+**/target
+**/.vscode
+**/.helix
+**/.cache
+**/node_modules
