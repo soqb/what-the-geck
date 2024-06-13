@@ -9,11 +9,11 @@ use crate::lower::iter_lowered_variables;
 use crate::Variables;
 
 use super::ascii::{CaselessStr, CaselessString};
-use super::Result;
+use super::{Respan, Result};
 
 use fir::{
-    typeck, Const, Diagnostic, DynamicComponent, EventIdx, ExternalVariableIdx, FormIdx, Frontend,
-    FunctionDefinition, FunctionIdx, InternalVariableIdx, Resources, Spanned, ToSpan,
+    typeck, utils::ResourcesExt as _, Const, Diagnostic, EventIdx, ExternalVariableIdx, FormIdx,
+    Frontend, FunctionDefinition, FunctionIdx, InternalVariableIdx, Resources, Spanned, ToSpan,
     TypeDefinition, TypeIdx,
 };
 
@@ -85,14 +85,15 @@ pub(crate) struct ScriptMetadata {
     pub(crate) internal_variable_name_map: IndexMap<CaselessString, fir::ExternalVariableIdx>,
 }
 
-pub struct LowerContext<'a, F> {
-    resources: &'a LowerResources<'a>,
+pub struct LowerContext<'a, F, R> {
+    resources: &'a LowerResources<'a, R>,
     scope: Scope<'a>,
     frontend: &'a mut F,
     meta: &'a ScriptMetadata,
+    src: &'a str,
 }
 
-impl<'a, F> typeck::LocalResources for LowerContext<'a, F> {
+impl<'a, F, R: Resources> typeck::LocalResources for LowerContext<'a, F, R> {
     fn get_form(&self, idx: fir::FormIdx) -> Option<&fir::FormInfo> {
         self.resources.raw.get_form(idx)
     }
@@ -124,7 +125,44 @@ impl<'a, F> typeck::LocalResources for LowerContext<'a, F> {
     }
 }
 
-impl<'a, F: Frontend + 'a> LowerContext<'a, F> {
+#[derive(Clone, Copy, Debug)]
+pub enum Case {
+    Lowercase,
+}
+
+impl Case {
+    #[inline(always)]
+    pub fn ck_byte(self, byte: u8) -> bool {
+        match self {
+            Case::Lowercase => !byte.is_ascii_uppercase(),
+        }
+    }
+}
+
+pub(crate) fn ck_token_case<T>(
+    f: &mut impl Frontend,
+    src: &str,
+    kw: &impl Respan<T>,
+    case: Case,
+) -> Result<()> {
+    let span = kw.span();
+    let text = &src[span];
+    if text.bytes().any(move |byte| !case.ck_byte(byte)) {
+        let expected = text.to_ascii_lowercase();
+        f.report(LowerWarning::WrongCase {
+            found: span,
+            expected,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+impl<'a, F: Frontend + 'a, R: Resources> LowerContext<'a, F, R> {
+    pub(crate) fn ck_token_case<T>(&mut self, kw: &impl Respan<T>) -> Result<()> {
+        ck_token_case(self.frontend, self.src, kw, Case::Lowercase)
+    }
+
     fn cmp_case(found: Spanned<&str>, expected: &CaselessStr) -> Option<LowerDiagnostic> {
         if *found.inner() != expected.as_ref() {
             Some(
@@ -139,12 +177,12 @@ impl<'a, F: Frontend + 'a> LowerContext<'a, F> {
         }
     }
 
-    fn get_casewise<'b, I: Copy, T: 'b, R>(
+    fn get_casewise<'b, I: Copy, T: 'b, U>(
         collection: &'b Index<'b, I, T>,
         name: Spanned<&str>,
-        map_data: impl FnOnce(&'b T) -> R,
+        map_data: impl FnOnce(&'b T) -> U,
         error: impl FnOnce(fir::Span) -> LowerDiagnostic,
-    ) -> Result<(I, R, Option<LowerDiagnostic>), LowerDiagnostic> {
+    ) -> Result<(I, U, Option<LowerDiagnostic>), LowerDiagnostic> {
         collection
             .get_key_value(CaselessStr::new(&name.into_inner()))
             .ok_or_else(|| error(name.to_span()))
@@ -152,19 +190,21 @@ impl<'a, F: Frontend + 'a> LowerContext<'a, F> {
     }
 
     pub fn new(
-        resources: &'a LowerResources<'a>,
+        resources: &'a LowerResources<'a, R>,
         frontend: &'a mut F,
         meta: &'a ScriptMetadata,
+        src: &'a str,
     ) -> Self {
         Self {
             scope: Scope::default(),
             resources,
             meta,
             frontend,
+            src,
         }
     }
 
-    pub fn resources(&self) -> &'a Resources<DynamicComponent> {
+    pub fn resources(&self) -> &'a R {
         self.resources.raw
     }
 
@@ -179,11 +219,11 @@ impl<'a, F: Frontend + 'a> LowerContext<'a, F> {
         self.frontend.report_all(d)
     }
 
-    pub fn in_block<R>(
+    pub fn in_block<U>(
         &mut self,
         block_termination: fir::BranchTarget,
-        f: impl FnOnce(&mut LowerContext<'_, F>) -> R,
-    ) -> (fir::Block, R) {
+        f: impl FnOnce(&mut LowerContext<'_, F, R>) -> U,
+    ) -> (fir::Block, U) {
         let mut new_scope = LowerContext {
             scope: Scope {
                 variable_name_map: Default::default(),
@@ -197,6 +237,7 @@ impl<'a, F: Frontend + 'a> LowerContext<'a, F> {
             resources: self.resources,
             frontend: self.frontend,
             meta: self.meta,
+            src: self.src,
         };
         let return_value = f(&mut new_scope);
         let Scope {
@@ -347,8 +388,8 @@ impl<'a, F: Frontend + 'a> LowerContext<'a, F> {
 
 type Index<'a, I, T = ()> = HashMap<&'a CaselessStr, (I, T)>;
 
-pub struct LowerResources<'a> {
-    raw: &'a Resources<DynamicComponent>,
+pub struct LowerResources<'a, R> {
+    raw: &'a R,
     functions: Index<'a, FunctionIdx, &'a FunctionDefinition>,
     forms: Index<'a, FormIdx, Index<'a, InternalVariableIdx, ExternalVariableIdx>>,
     events: Index<'a, EventIdx>,
@@ -356,7 +397,7 @@ pub struct LowerResources<'a> {
     global_variables: Index<'a, ExternalVariableIdx>,
 }
 
-impl<'a> LowerResources<'a> {
+impl<'a, R: Resources> LowerResources<'a, R> {
     fn reformulate_index<I: Copy, V: 'a, T>(
         index: impl Iterator<Item = (I, &'a V)>,
         mut name: impl FnMut(&'a V) -> Option<&'a str>,
@@ -369,7 +410,7 @@ impl<'a> LowerResources<'a> {
             .collect()
     }
 
-    pub fn build_from_resources(raw: &'a Resources<DynamicComponent>) -> Self {
+    pub fn build_from_resources(raw: &'a R) -> Self {
         let enums = raw
             .iter_types()
             .filter_map(|(idx, info)| {

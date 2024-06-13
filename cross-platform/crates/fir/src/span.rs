@@ -2,12 +2,20 @@ use core::fmt;
 use core::ops::Deref;
 use std::hash::Hash;
 use std::iter::Sum;
-use std::ops::Range;
+use std::ops::{Index, Range};
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Span {
     pub start: usize,
     pub end: usize,
+}
+
+impl Index<Span> for str {
+    type Output = str;
+
+    fn index(&self, index: Span) -> &Self::Output {
+        &self[index.start..index.end]
+    }
 }
 
 impl Span {

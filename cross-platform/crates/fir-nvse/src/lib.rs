@@ -1,10 +1,13 @@
-use std::{fs, io::Cursor};
+use std::{
+    fs,
+    io::{self, Cursor},
+};
 
 use binrw::Endian;
 use fir::{
-    Const, DynamicComponent, EventInfo, FormInfo, FunctionDefinition, FunctionInfo,
-    FunctionReference, Ident4, Name, ParamInfo, RefTy, TargetContext, Ty, TypeDefinition, TypeIdx,
-    TypeInfo, VariableInfo,
+    ComponentInfo, Const, Diagnostic, EventInfo, FormInfo, Frontend, FunctionDefinition,
+    FunctionInfo, FunctionReference, Ident4, Insert, Name, ParamInfo, RefTy, ResourcesMut,
+    StopToken, TargetContext, Ty, TypeDefinition, TypeIdx, TypeInfo, VariableInfo,
 };
 
 use hashbrown::{HashMap, HashSet};
@@ -34,6 +37,22 @@ pub struct Context {
     type_furniture: Option<TypeIdx>,
 }
 
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
+pub enum Error {
+    #[error("io error")]
+    Io(#[from] io::Error),
+    #[error("deserialisation failed (cache)")]
+    RonDeser(#[from] ron::error::SpannedError),
+    #[error("deserialisation failed (binary)")]
+    BinDeser(#[from] binrw::Error),
+}
+
+impl Diagnostic for Error {
+    fn kind(&self) -> fir::DiagnosticKind {
+        fir::DiagnosticKind::CompileFail
+    }
+}
+
 fn name(name: &str) -> Name {
     Name {
         ident: name.to_owned(),
@@ -41,7 +60,7 @@ fn name(name: &str) -> Name {
 }
 
 impl Context {
-    fn load_commands(&self) -> anyhow::Result<Vec<CommandInfo>> {
+    fn load_commands(&self) -> Result<Vec<CommandInfo>, Error> {
         let mut vec = Vec::new();
 
         for file in fs::read_dir("../win32/.cache")? {
@@ -54,7 +73,7 @@ impl Context {
         Ok(vec)
     }
 
-    fn load_records(&self, component: &mut DynamicComponent) -> anyhow::Result<()> {
+    fn load_records(&self, component: &mut impl Insert) -> Result<(), Error> {
         let start = std::time::Instant::now();
         let read = fs::read(
             "/home/seth/.local/share/Steam/steamapps/common/Fallout New Vegas/Data/FalloutNV.esm",
@@ -108,10 +127,10 @@ impl Context {
 
     fn fold_forms<'a>(
         &self,
-        component: &mut DynamicComponent,
+        component: &mut impl Insert,
         index: &HashMap<FormId, &'a Record>,
         entries: impl IntoIterator<Item = &'a PluginEntry>,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), Error> {
         for entry in entries {
             match entry {
                 PluginEntry::Group { label: _, contents } => {
@@ -157,7 +176,7 @@ impl Context {
                                     })
                                 })
                                 .for_each(|info| {
-                                    component.insert_variable(info);
+                                    component.insert_external_variable(info);
                                 });
                         }
                     }
@@ -169,7 +188,7 @@ impl Context {
         Ok(())
     }
 
-    fn map_param_type(&mut self, param: ParamType, component: &mut DynamicComponent) -> Ty {
+    fn map_param_type(&mut self, param: ParamType, component: &mut impl Insert) -> Ty {
         macro_rules! intern_type {
             ($opt_expr:expr, $name:ident = $type:expr $(,)?) => {
                 Ty::Adt($opt_expr.unwrap_or_else(|| {
@@ -215,7 +234,7 @@ impl Context {
             ParamType::Float => Ty::Float,
             ParamType::ObjectRef => Ty::Ref(RefTy::ANY_OBJECT),
             ParamType::String => Ty::String,
-            ParamType::NVSEArray => todo!(),
+            ParamType::NvseArray => todo!(),
             ParamType::ActorValue => intern_type!(
                 self.type_actor_value,
                 ActorValue = ty_enum! {
@@ -826,7 +845,7 @@ impl Context {
                 Furniture = ty_forms!(forms <- "FURN" | "FLST"),
             ),
             ParamType::WorldSpace => Ty::form_ref("WRLD"),
-            ParamType::AIPackage => Ty::form_ref("PACK"),
+            ParamType::AiPackage => Ty::form_ref("PACK"),
             ParamType::CombatStyle => Ty::form_ref("CSTY"),
             ParamType::MagicEffect => Ty::form_ref("MGEF"), // i'm not sure if this is used.
             ParamType::WeatherId => Ty::form_ref("WTHR"), // this is a good guess. i have no evidence to support this definition
@@ -874,7 +893,7 @@ impl Context {
         }
     }
 
-    fn insert_events(&self, component: &mut DynamicComponent) {
+    fn insert_events(&self, component: &mut impl Insert) {
         fn zero() -> Vec<ParamInfo> {
             vec![]
         }
@@ -950,12 +969,21 @@ impl Context {
     }
 }
 
-impl TargetContext for Context {
-    type Component = DynamicComponent;
+impl<R: ResourcesMut> TargetContext<R> for Context {
+    fn install<F: Frontend>(
+        mut self,
+        frontend: &mut F,
+        resources: &mut R,
+    ) -> Result<(), StopToken> {
+        let mut component = resources.new_component_cx(ComponentInfo {
+            identifier: "nvse".to_owned(),
+            ..Default::default()
+        });
 
-    fn build_component(mut self, idx: fir::ComponentIdx) -> anyhow::Result<Self::Component> {
-        let mut component = DynamicComponent::new(idx, "nvse");
-        for command in self.load_commands()? {
+        let commands = self
+            .load_commands()
+            .or_else(|err| frontend.report(err).map(|_| Vec::new()))?;
+        for command in commands {
             let func = FunctionInfo {
                 name: Name {
                     ident: command.long_name,
@@ -987,19 +1015,20 @@ impl TargetContext for Context {
         }
 
         self.insert_events(&mut component);
-        self.load_records(&mut component)?;
+        self.load_records(&mut component)
+            .or_else(|err| frontend.report(err))?;
 
-        component.insert_variable(VariableInfo {
+        component.insert_external_variable(VariableInfo {
             name: name("player"),
             owning_form: None,
             ty: Ty::object_ref("ACHR"),
         });
-        component.insert_variable(VariableInfo {
+        component.insert_external_variable(VariableInfo {
             name: name("playerRef"),
             owning_form: None,
             ty: Ty::object_ref("ACHR"),
         });
 
-        Ok(component)
+        Ok(())
     }
 }

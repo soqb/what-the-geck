@@ -1,6 +1,6 @@
 use fir::{
-    Component, Diagnostic, EventIdx, EventInfo, ExternalVariableIdx, FormIdx, FormInfo, Frontend,
-    FunctionIdx, FunctionInfo, Resources, Spanned, ToSpan, TypeIdx, TypeInfo, VariableInfo,
+    Diagnostic, EventIdx, EventInfo, ExternalVariableIdx, FormIdx, FormInfo, Frontend, FunctionIdx,
+    FunctionInfo, Resources, Spanned, ToSpan, TypeIdx, TypeInfo, VariableInfo,
 };
 
 use crate::{NotFound, Result, Undefined};
@@ -24,8 +24,8 @@ pub struct LowerOpts {
     pub event_strategy: EventStrategy,
 }
 
-pub struct LowerCx<'a, F, C> {
-    pub res: &'a Resources<C>,
+pub struct LowerCx<'a, F, R> {
+    pub res: &'a R,
     pub opts: LowerOpts,
     pub source: &'a fir::Script,
     pub frontend: &'a mut F,
@@ -40,7 +40,7 @@ pub(crate) fn idx_undefined_adapter<T, I>(
     f(idx.into_inner()).ok_or_else(|| Undefined { span, kind })
 }
 
-impl<'a, F: Frontend, C: Component> LowerCx<'a, F, C> {
+impl<'a, F: Frontend, R: Resources> LowerCx<'a, F, R> {
     pub fn get_function(&self, idx: Spanned<FunctionIdx>) -> Result<&'a FunctionInfo, Undefined> {
         idx_undefined_adapter(NotFound::Function, |idx| self.res.get_function(idx), idx)
     }

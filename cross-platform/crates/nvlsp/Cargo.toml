@@ -9,9 +9,10 @@ crossbeam-channel = "0.5.8"
 env_logger = "0.10.0"
 hashbrown = "0.13.2"
 log = { version = "0.4.17", features = ["std"] }
-tower-lsp = { version = "0.20.0" }
+# tower-lsp = { version = "0.20.0", default-features = false, features = ["runtime-agnostic"] }
+lsp-server = "0.7.6"
 lsp-types = "0.94.0"
-miette = "5.9.0"
+miette = "7.2.0"
 fir-geckscript = { path = "../fir-geckscript" }
 fir-nvse = { path = "../fir-nvse" }
 fir = { path = "../fir" }

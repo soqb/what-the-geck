@@ -128,8 +128,8 @@ pub enum InternalVariableSource {
     Manual(HashMap<InternalVariableIdx, VariableInfo>),
 }
 
-pub struct ModuleBuilder<'a, F, C> {
-    pub bg: LowerCx<'a, F, C>,
+pub struct ModuleBuilder<'a, F, R> {
+    pub bg: LowerCx<'a, F, R>,
     /// WASM global variable indices for form-internal fir variables.
     pub global_var_indices: HashMap<InternalVariableIdx, (u32, ValType)>,
     pub funcs: WasmStore<'a, WasmTypeDef>,
@@ -160,8 +160,8 @@ where
         .collect()
 }
 
-impl<'a, F: Frontend, C: Component> ModuleBuilder<'a, F, C> {
-    pub fn new(bg: LowerCx<'a, F, C>, internal_source: InternalVariableSource) -> Self {
+impl<'a, F: Frontend, R: Resources> ModuleBuilder<'a, F, R> {
+    pub fn new(bg: LowerCx<'a, F, R>, internal_source: InternalVariableSource) -> Self {
         let mut cx = Self {
             bg,
             internal_source,
@@ -329,8 +329,8 @@ impl<'a, F: Frontend, C: Component> ModuleBuilder<'a, F, C> {
 
 type LocalVarIndices = HashMap<(u32, BodyVariableIdx), (u32, ValType)>;
 
-pub(crate) struct CodeBuilder<'ctx, 's, F, C> {
-    pub cx: &'s mut ModuleBuilder<'ctx, F, C>,
+pub(crate) struct CodeBuilder<'ctx, 's, F, R> {
+    pub cx: &'s mut ModuleBuilder<'ctx, F, R>,
     pub local_var_indices: LocalVarIndices,
     pub body: &'s FunctionBody,
     // necessary to fiddle with `local_var_indices`
@@ -340,8 +340,8 @@ pub(crate) struct CodeBuilder<'ctx, 's, F, C> {
     target_function: Option<&'s mut Function>,
 }
 
-impl<'s, 'ctx: 's, F: Frontend, C: Component> typeck::LocalResources
-    for CodeBuilder<'ctx, 's, F, C>
+impl<'s, 'ctx: 's, F: Frontend, R: Resources> typeck::LocalResources
+    for CodeBuilder<'ctx, 's, F, R>
 {
     fn get_form(&self, idx: fir::FormIdx) -> Option<&fir::FormInfo> {
         self.cx.bg.res.get_form(idx)
@@ -368,9 +368,9 @@ impl<'s, 'ctx: 's, F: Frontend, C: Component> typeck::LocalResources
     }
 }
 
-impl<'s, 'ctx: 's, F: Frontend, C: Component> CodeBuilder<'ctx, 's, F, C> {
+impl<'s, 'ctx: 's, F: Frontend, R: Resources> CodeBuilder<'ctx, 's, F, R> {
     pub(self) fn new(
-        cx: &'s mut ModuleBuilder<'ctx, F, C>,
+        cx: &'s mut ModuleBuilder<'ctx, F, R>,
         body: &'s FunctionBody,
         local_var_key: u32,
     ) -> Self {
@@ -439,8 +439,8 @@ impl<'s, 'ctx: 's, F, C> Extend<Instruction<'static>> for CodeBuilder<'ctx, 's, 
     }
 }
 
-pub(crate) fn function_from_body<F: Frontend, C: Component>(
-    cx: &mut ModuleBuilder<'_, F, C>,
+pub(crate) fn function_from_body<F: Frontend, R: Resources>(
+    cx: &mut ModuleBuilder<'_, F, R>,
     body: &FunctionBody,
 ) -> Result<Option<Function>> {
     let mut builder = CodeBuilder::new(cx, body, 0);
@@ -457,8 +457,8 @@ pub(crate) fn function_from_body<F: Frontend, C: Component>(
     Ok(success.then_some(func))
 }
 
-pub(crate) fn function_from_single_event<F: Frontend, C: Component>(
-    cx: &mut ModuleBuilder<'_, F, C>,
+pub(crate) fn function_from_single_event<F: Frontend, R: Resources>(
+    cx: &mut ModuleBuilder<'_, F, R>,
     event: &'_ EventImpl,
 ) -> Result<Option<Function>> {
     function_from_body(cx, &event.body)
@@ -467,10 +467,10 @@ pub(crate) fn function_from_single_event<F: Frontend, C: Component>(
 pub(crate) fn function_from_multiple_events<
     'a,
     F: Frontend,
-    C: Component,
+    R: Resources,
     I: Iterator<Item = &'a EventImpl>,
 >(
-    cx: &mut ModuleBuilder<'_, F, C>,
+    cx: &mut ModuleBuilder<'_, F, R>,
     events: impl Fn() -> I,
 ) -> Result<Option<Function>> {
     let mut block_idx_offset = 0;

@@ -7,7 +7,9 @@ pub use diagnostics::*;
 
 #[cfg(test)]
 mod tests {
-    use fir::{DynamicComponent, Frontend, LowerProject};
+    use std::io;
+
+    use fir::{Frontend, Insert, LowerProject, ResourcesMut};
     use fir_geckscript::lower::Geckscript;
 
     use crate::{
@@ -22,9 +24,9 @@ scn 556mmSurplusAmmoAddScript
 
 int killme
 
-BEGIN OnAdd Player
-	Set killme to 1
-END
+begin OnAdd player
+	set killme to 1
+end
 
 begin GameMode
 	RemoveMe
@@ -32,7 +34,7 @@ begin GameMode
 	int numberToAdd;
 	
 	if (killme == 1)
-		Player.AddItem Ammo556mmSurplus 250
+		player.AddItem Ammo556mmSurplus 250
 		RemoveMe
 	endif
 
@@ -54,16 +56,18 @@ end
             one_source: &'static str,
         }
 
-        impl fir::Sources<&'static str> for Sources {
+        impl fir::Sources for Sources {
+            type Input<'a> = &'a str;
+
             fn project_name(&self) -> &str {
                 "joe's project!"
             }
 
-            fn iter_sources(&self) -> impl Iterator<Item = (fir::SourceIdx, &'static str)> {
+            fn iter_sources(&self) -> impl Iterator<Item = (fir::SourceIdx, &str)> {
                 Some((fir::SourceIdx(0), self.one_source)).into_iter()
             }
 
-            fn get_source(&self, idx: fir::SourceIdx) -> Option<&'static str> {
+            fn get_source(&self, idx: fir::SourceIdx) -> Option<&str> {
                 if idx == fir::SourceIdx(0) {
                     Some(self.one_source)
                 } else {
@@ -75,23 +79,33 @@ end
         let sources = Sources { one_source: src };
         let project = fir::Project::new(&sources, &mut f);
 
-        let mut resources = fir::Resources::default();
-        let mut instance = {
-            let idx = resources.next_component_idx();
-            let (instance, component) = Geckscript::make_component(project, idx)?;
-            resources.install_component(component);
-            instance
+        let mut resources = fir::TheResources::default();
+        let mut instance = Geckscript::default();
+        let info = fir::ComponentInfo {
+            identifier: "nvse compiled scripts".to_owned(),
         };
 
-        fn create_component(idx: fir::ComponentIdx) -> DynamicComponent {
+        {
+            let mut component = resources.new_component_cx(info);
+            <_ as LowerProject<fir::TheResources>>::make_component_for(
+                &mut instance,
+                project,
+                &mut component,
+            )?;
+            drop(component);
+        }
+
+        fn create_component(res: &mut impl ResourcesMut) {
             fn name(n: &str) -> fir::Name {
                 fir::Name {
                     ident: n.to_owned(),
                 }
             }
 
-            let mut component = DynamicComponent::new(idx, "test-comp");
-            component.insert_variable(fir::VariableInfo {
+            let mut component = res.new_component_cx(fir::ComponentInfo {
+                identifier: "test-dependencies".to_owned(),
+            });
+            component.insert_external_variable(fir::VariableInfo {
                 name: name("player"),
                 owning_form: None,
                 ty: fir::Ty::object_ref("ACHR"),
@@ -137,13 +151,9 @@ end
                     return_ty: fir::Ty::Float,
                 }),
             });
-            component
         }
 
-        {
-            let idx = resources.next_component_idx();
-            resources.install_component(create_component(idx));
-        }
+        create_component(&mut resources);
 
         let mut script = None;
         let project = fir::Project::new(&sources, &mut f);
@@ -167,7 +177,10 @@ end
             fir_geckscript::utils_pain::miette(e, src);
         });
         let module = builder.into_module().unwrap();
-        std::fs::write("out.wasm", module.as_slice()).unwrap();
+
+        let bytes = module.finish();
+        let mut outstream = io::stdout();
+        io::copy(&mut &bytes[..], &mut outstream).unwrap();
 
         Ok(())
     }

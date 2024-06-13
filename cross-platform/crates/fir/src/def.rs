@@ -158,11 +158,7 @@ macro_rules! define_idx {
     }
 }
 
-define_idx!(
-    /// While backed by a `u16`, indices wrap after twelve bits (4095).
-    pub ComponentIdx(pub u16) <- "component"
-);
-
+define_idx!(pub ComponentIdx(pub u64) <- "component");
 define_idx!(pub ExternalVariableIdx(pub u64) <- "variable");
 define_idx!(pub FunctionIdx(pub u64) <- "function");
 define_idx!(pub FormIdx(pub u64) <- "form");

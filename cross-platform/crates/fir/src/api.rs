@@ -1,7 +1,8 @@
 use core::fmt;
-use std::{marker::PhantomData, path::PathBuf};
+use std::{mem, path::PathBuf};
 
 use hashbrown::HashMap;
+use slotmap::SlotMap;
 
 use crate::*;
 
@@ -282,10 +283,22 @@ pub struct VariableInfo {
 ///
 /// Compliant implementations do not have to respect this signal,
 /// though they can choose to.
+///
+/// In an effort to require that errors are properly handled,
+/// stop tokens can only be manufactured through [`Frontend::forge_stop_token`].
+/// This is relatively easy to circumvent, and that choice is intentional
+/// as it provides an escape hatch for opting-out of this crate's opinionated design.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy)]
-pub struct StopToken;
-
+pub struct StopToken {
+    _marker: (),
+}
 pub trait Frontend {
+    ///
+    fn forge_stop_token() -> StopToken {
+        StopToken { _marker: () }
+    }
+
     fn report(&mut self, diagnostic: impl Diagnostic + 'static) -> Result<(), StopToken>;
 
     fn report_all<D: Diagnostic + 'static>(
@@ -300,15 +313,55 @@ pub trait Frontend {
     }
 }
 
-pub trait TargetContext {
-    type Component: Component;
-
-    fn build_component(self, idx: ComponentIdx) -> anyhow::Result<Self::Component>;
+pub trait TargetContext<R: ResourcesMut> {
+    fn install<'a, F: Frontend>(self, frontend: &mut F, resources: &mut R)
+        -> Result<(), StopToken>;
 }
 
 pub trait Component {
     fn identifier(&self) -> &str;
-    fn get_idx(&self) -> ComponentIdx;
+    // fn get_idx(&self) -> ComponentIdx;
+
+    // fn get_function(&self, key: FunctionIdx) -> Option<&FunctionInfo>;
+    // fn get_form(&self, key: FormIdx) -> Option<&FormInfo>;
+    // fn get_event(&self, key: EventIdx) -> Option<&EventInfo>;
+    // fn get_type(&self, key: TypeIdx) -> Option<&TypeInfo>;
+    // fn get_external_variable(&self, key: ExternalVariableIdx) -> Option<&VariableInfo>;
+
+    // fn iter_functions(&self) -> impl Iterator<Item = (FunctionIdx, &FunctionInfo)>;
+    // fn iter_forms(&self) -> impl Iterator<Item = (FormIdx, &FormInfo)>;
+    // fn iter_events(&self) -> impl Iterator<Item = (EventIdx, &EventInfo)>;
+    // fn iter_types(&self) -> impl Iterator<Item = (TypeIdx, &TypeInfo)>;
+    // fn iter_variables(&self) -> impl Iterator<Item = (ExternalVariableIdx, &VariableInfo)>;
+}
+
+#[derive(Debug, Default)]
+pub struct ComponentInfo {
+    pub identifier: String,
+}
+
+#[derive(Debug, Default)]
+pub struct ComponentEntry {
+    info: ComponentInfo,
+    functions: Vec<FunctionIdx>,
+    forms: Vec<FormIdx>,
+    events: Vec<EventIdx>,
+    types: Vec<TypeIdx>,
+    external_variables: Vec<ExternalVariableIdx>,
+}
+
+#[derive(Debug, Default)]
+pub struct TheResources {
+    components: SlotMap<ComponentIdx, ComponentEntry>,
+    functions: SlotMap<FunctionIdx, FunctionInfo>,
+    forms: SlotMap<FormIdx, FormInfo>,
+    events: SlotMap<EventIdx, EventInfo>,
+    types: SlotMap<TypeIdx, TypeInfo>,
+    external_variables: SlotMap<ExternalVariableIdx, VariableInfo>,
+}
+
+pub trait Resources {
+    fn component(&self, key: ComponentIdx) -> Option<&ComponentInfo>;
 
     fn get_function(&self, key: FunctionIdx) -> Option<&FunctionInfo>;
     fn get_form(&self, key: FormIdx) -> Option<&FormInfo>;
@@ -323,253 +376,390 @@ pub trait Component {
     fn iter_variables(&self) -> impl Iterator<Item = (ExternalVariableIdx, &VariableInfo)>;
 }
 
-#[derive(Debug)]
-pub struct Resources<C> {
-    components: HashMap<ComponentIdx, C>,
-    awaiting_components: u32,
+pub trait ResourcesMut: Resources {
+    type InsertCx<'a>: Insert<Res = Self>
+    where
+        Self: 'a;
+
+    fn new_component_cx(&mut self, info: ComponentInfo) -> Self::InsertCx<'_>;
+
+    fn function_mut(&mut self, key: FunctionIdx) -> Option<&mut FunctionInfo>;
+    fn form_mut(&mut self, key: FormIdx) -> Option<&mut FormInfo>;
+    fn event_mut(&mut self, key: EventIdx) -> Option<&mut EventInfo>;
+    fn type_mut(&mut self, key: TypeIdx) -> Option<&mut TypeInfo>;
+    fn external_variable_mut(&mut self, key: ExternalVariableIdx) -> Option<&mut VariableInfo>;
 }
 
-impl<C> Default for Resources<C> {
-    fn default() -> Self {
-        Self {
-            components: Default::default(),
-            awaiting_components: 0,
-        }
+pub trait Insert {
+    type Res: ResourcesMut;
+
+    fn insert_function(&mut self, func: FunctionInfo) -> FunctionIdx;
+    fn insert_form(&mut self, form: FormInfo) -> FormIdx;
+    fn insert_event(&mut self, event: EventInfo) -> EventIdx;
+    fn insert_type(&mut self, type_: TypeInfo) -> TypeIdx;
+    fn insert_external_variable(&mut self, var: VariableInfo) -> ExternalVariableIdx;
+
+    fn resources_mut(&mut self) -> &mut Self::Res;
+}
+
+pub struct InsertCx<'a> {
+    inner: ComponentEntry,
+    res: &'a mut TheResources,
+}
+
+impl<'a> Drop for InsertCx<'a> {
+    fn drop(&mut self) {
+        self.res.components.insert(mem::take(&mut self.inner));
     }
 }
 
-impl<C: Component> Resources<C> {
-    fn expected_component_idx(&self) -> u32 {
-        self.components.len() as u32
-    }
+impl<'a> Insert for InsertCx<'a> {
+    type Res = TheResources;
 
-    pub fn next_component_idx(&mut self) -> ComponentIdx {
-        let idx = ComponentIdx(self.expected_component_idx() + self.awaiting_components);
-        self.awaiting_components += 1;
+    fn insert_function(&mut self, func: FunctionInfo) -> FunctionIdx {
+        let idx = self.res.functions.insert(func);
+        self.inner.functions.push(idx);
         idx
     }
 
-    pub fn install_component(&mut self, component: C) {
-        if component.get_idx().0 != self.expected_component_idx() {
-            panic!(
-                "expected a component with {a}, but received {b}",
-                a = self.expected_component_idx(),
-                b = component.get_idx(),
-            );
-        }
-
-        self.awaiting_components -= 1;
-        self.components.insert(component.get_idx(), component);
+    fn insert_form(&mut self, form: FormInfo) -> FormIdx {
+        let idx = self.res.forms.insert(form);
+        self.inner.forms.push(idx);
+        idx
     }
 
-    pub fn component(&self, key: ComponentIdx) -> Option<&C> {
-        self.components.get(&key)
+    fn insert_event(&mut self, event: EventInfo) -> EventIdx {
+        let idx = self.res.events.insert(event);
+        self.inner.events.push(idx);
+        idx
     }
 
-    pub fn component_mut(&mut self, key: ComponentIdx) -> Option<&mut C> {
-        self.components.get_mut(&key)
+    fn insert_type(&mut self, type_: TypeInfo) -> TypeIdx {
+        let idx = self.res.types.insert(type_);
+        self.inner.types.push(idx);
+        idx
     }
 
-    fn fetch<I: Into<ComponentIdx> + Copy, D>(
-        &self,
-        key: I,
-        fetcher: impl FnOnce(&C, I) -> Option<&D>,
-    ) -> Option<&D> {
-        self.component(key.into())
-            .and_then(move |comp| fetcher(comp, key))
+    fn insert_external_variable(&mut self, var: VariableInfo) -> ExternalVariableIdx {
+        let idx = self.res.external_variables.insert(var);
+        self.inner.external_variables.push(idx);
+        idx
     }
 
-    pub fn get_function(&self, key: FunctionIdx) -> Option<&FunctionInfo> {
-        self.fetch(key, C::get_function)
-    }
-    pub fn get_form(&self, key: FormIdx) -> Option<&FormInfo> {
-        self.fetch(key, C::get_form)
-    }
-    pub fn get_event(&self, key: EventIdx) -> Option<&EventInfo> {
-        self.fetch(key, C::get_event)
-    }
-    pub fn get_type(&self, key: TypeIdx) -> Option<&TypeInfo> {
-        self.fetch(key, C::get_type)
-    }
-    pub fn get_external_variable(&self, key: ExternalVariableIdx) -> Option<&VariableInfo> {
-        self.fetch(key, C::get_external_variable)
-    }
-
-    pub fn iter_functions(&self) -> impl Iterator<Item = (FunctionIdx, &FunctionInfo)> {
-        self.components
-            .iter()
-            .flat_map(|(_, info)| info.iter_functions())
-    }
-    pub fn iter_forms(&self) -> impl Iterator<Item = (FormIdx, &FormInfo)> {
-        self.components
-            .iter()
-            .flat_map(|(_, info)| info.iter_forms())
-    }
-    pub fn iter_events(&self) -> impl Iterator<Item = (EventIdx, &EventInfo)> {
-        self.components
-            .iter()
-            .flat_map(|(_, info)| info.iter_events())
-    }
-    pub fn iter_types(&self) -> impl Iterator<Item = (TypeIdx, &TypeInfo)> {
-        self.components
-            .iter()
-            .flat_map(|(_, info)| info.iter_types())
-    }
-    pub fn iter_variables(&self) -> impl Iterator<Item = (ExternalVariableIdx, &VariableInfo)> {
-        self.components
-            .iter()
-            .flat_map(|(_, info)| info.iter_variables())
+    fn resources_mut(&mut self) -> &mut TheResources {
+        self.res
     }
 }
 
-pub struct DynamicComponent {
-    this_idx: ComponentIdx,
-    identifier: String,
-
-    functions: HashMap<FunctionIdx, FunctionInfo>,
-    forms: HashMap<FormIdx, FormInfo>,
-    events: HashMap<EventIdx, EventInfo>,
-    types: HashMap<TypeIdx, TypeInfo>,
-    variables: HashMap<ExternalVariableIdx, VariableInfo>,
-}
-
-impl DynamicComponent {
-    pub fn new(idx: ComponentIdx, identifier: impl Into<String>) -> Self {
-        Self {
-            this_idx: idx,
-            identifier: identifier.into(),
-
-            functions: Default::default(),
-            forms: Default::default(),
-            events: Default::default(),
-            types: Default::default(),
-            variables: Default::default(),
-        }
-    }
-
-    fn next_idx<I, D>(&self, collection: &HashMap<I, D>) -> u64 {
-        let len: u64 = collection.len() as u32 as u64;
-        let comp_idx = u32::from(self.this_idx) as u64;
-        (comp_idx << 32) + len
-    }
-
-    pub fn insert_function(&mut self, func: FunctionInfo) -> FunctionIdx {
-        let key = FunctionIdx(self.next_idx(&self.functions));
-        self.functions.insert(key, func);
-        key
-    }
-    pub fn insert_form(&mut self, form: FormInfo) -> FormIdx {
-        let key = FormIdx(self.next_idx(&self.forms));
-        self.forms.insert(key, form);
-        key
-    }
-    pub fn insert_event(&mut self, event: EventInfo) -> EventIdx {
-        let key = EventIdx(self.next_idx(&self.events));
-        self.events.insert(key, event);
-        key
-    }
-    pub fn insert_type(&mut self, type_: TypeInfo) -> TypeIdx {
-        let key = TypeIdx(self.next_idx(&self.types));
-        self.types.insert(key, type_);
-        key
-    }
-    pub fn insert_variable(&mut self, var: VariableInfo) -> ExternalVariableIdx {
-        let key = ExternalVariableIdx(self.next_idx(&self.variables));
-        if let Some(form_idx) = var.owning_form {
-            if let Some(form) = self.forms.get_mut(&form_idx) {
-                let variables = &mut form.script.get_or_insert_with(Default::default).variables;
-                let idx = InternalVariableIdx(variables.len() as u32);
-                variables.insert(idx, key);
-            }
-        }
-        self.variables.insert(key, var);
-        key
-    }
-}
-
-impl Component for DynamicComponent {
-    fn get_idx(&self) -> ComponentIdx {
-        self.this_idx
-    }
-
-    fn identifier(&self) -> &str {
-        &self.identifier
+impl Resources for TheResources {
+    fn component(&self, key: ComponentIdx) -> Option<&ComponentInfo> {
+        self.components.get(key).map(|comp| &comp.info)
     }
 
     fn get_function(&self, key: FunctionIdx) -> Option<&FunctionInfo> {
-        self.functions.get(&key)
+        self.functions.get(key)
     }
+
     fn get_form(&self, key: FormIdx) -> Option<&FormInfo> {
-        self.forms.get(&key)
+        self.forms.get(key)
     }
+
     fn get_event(&self, key: EventIdx) -> Option<&EventInfo> {
-        self.events.get(&key)
+        self.events.get(key)
     }
+
     fn get_type(&self, key: TypeIdx) -> Option<&TypeInfo> {
-        self.types.get(&key)
+        self.types.get(key)
     }
+
     fn get_external_variable(&self, key: ExternalVariableIdx) -> Option<&VariableInfo> {
-        self.variables.get(&key)
+        self.external_variables.get(key)
     }
 
     fn iter_functions(&self) -> impl Iterator<Item = (FunctionIdx, &FunctionInfo)> {
-        self.functions.iter().map(|(&idx, info)| (idx, info))
+        self.functions.iter()
     }
+
     fn iter_forms(&self) -> impl Iterator<Item = (FormIdx, &FormInfo)> {
-        self.forms.iter().map(|(&idx, info)| (idx, info))
+        self.forms.iter()
     }
+
     fn iter_events(&self) -> impl Iterator<Item = (EventIdx, &EventInfo)> {
-        self.events.iter().map(|(&idx, info)| (idx, info))
+        self.events.iter()
     }
+
     fn iter_types(&self) -> impl Iterator<Item = (TypeIdx, &TypeInfo)> {
-        self.types.iter().map(|(&idx, info)| (idx, info))
+        self.types.iter()
     }
+
     fn iter_variables(&self) -> impl Iterator<Item = (ExternalVariableIdx, &VariableInfo)> {
-        self.variables.iter().map(|(&idx, info)| (idx, info))
+        self.external_variables.iter()
     }
 }
 
-pub trait Backend {
-    type Context: TargetContext;
-    fn cx_provider(&mut self) -> &mut Self::Context;
-}
+impl ResourcesMut for TheResources {
+    type InsertCx<'a> = InsertCx<'a>;
 
-pub trait Sources<I> {
-    fn project_name(&self) -> &str;
-
-    fn iter_sources(&self) -> impl Iterator<Item = (SourceIdx, I)>;
-    fn get_source(&self, idx: SourceIdx) -> Option<I>;
-}
-
-pub struct Project<'a, I, S, F> {
-    pub sources: &'a S,
-    pub frontend: &'a mut F,
-    _marker: PhantomData<fn() -> I>,
-}
-
-impl<'a, I, S: Sources<I>, F: Frontend> Project<'a, I, S, F> {
-    pub fn new(sources: &'a S, frontend: &'a mut F) -> Self {
-        Self {
-            sources,
-            frontend,
-            _marker: PhantomData,
+    fn new_component_cx(&mut self, info: ComponentInfo) -> Self::InsertCx<'_> {
+        InsertCx {
+            inner: ComponentEntry {
+                info,
+                ..Default::default()
+            },
+            res: self,
         }
     }
+
+    fn function_mut(&mut self, key: FunctionIdx) -> Option<&mut FunctionInfo> {
+        self.functions.get_mut(key)
+    }
+
+    fn form_mut(&mut self, key: FormIdx) -> Option<&mut FormInfo> {
+        self.forms.get_mut(key)
+    }
+
+    fn event_mut(&mut self, key: EventIdx) -> Option<&mut EventInfo> {
+        self.events.get_mut(key)
+    }
+
+    fn type_mut(&mut self, key: TypeIdx) -> Option<&mut TypeInfo> {
+        self.types.get_mut(key)
+    }
+
+    fn external_variable_mut(&mut self, key: ExternalVariableIdx) -> Option<&mut VariableInfo> {
+        self.external_variables.get_mut(key)
+    }
 }
 
-pub trait LowerProject<'a, C: Component>: Sized {
-    type Input;
+// impl TheResources {
+//     // fn expected_component_idx(&self) -> u16 {
+//     //     self.components
+//     //         .len()
+//     //         .try_into()
+//     //         .unwrap_or_else(|_| panic!("ran out of conmponent indices!"))
+//     // }
 
-    fn make_component_for<S: Sources<Self::Input>, F: Frontend>(
-        &mut self,
-        project: Project<'_, Self::Input, S, F>,
-        component_idx: ComponentIdx,
-    ) -> Result<C, StopToken>;
+//     // pub fn next_component_idx(&mut self) -> ComponentIdx {
+//     //     let idx = ComponentIdx(self.expected_component_idx() + self.awaiting_components);
+//     //     self.awaiting_components += 1;
+//     //     idx
+//     // }
 
-    fn lower_scripts<S: Sources<Self::Input>, F: Frontend>(
+//     // pub fn install_component(&mut self, component: C) {
+//     //     if component.get_idx().0 != self.expected_component_idx() {
+//     //         panic!(
+//     //             "expected a component with {a}, but received {b}",
+//     //             a = self.expected_component_idx(),
+//     //             b = component.get_idx(),
+//     //         );
+//     //     }
+
+//     //     self.awaiting_components -= 1;
+//     //     self.components.insert(component.get_idx(), component);
+//     // }
+
+//     // pub fn component(&self, key: ComponentIdx) -> Option<&C> {
+//     //     self.components.get(&key)
+//     // }
+
+//     // pub fn component_mut(&mut self, key: ComponentIdx) -> Option<&mut C> {
+//     //     self.components.get_mut(&key)
+//     // }
+
+//     fn fetch<I: Into<ComponentIdx> + Copy, D>(
+//         &self,
+//         key: I,
+//         fetcher: impl FnOnce(&C, I) -> Option<&D>,
+//     ) -> Option<&D> {
+//         self.component(key.into())
+//             .and_then(move |comp| fetcher(comp, key))
+//     }
+
+//     pub fn get_function(&self, key: FunctionIdx) -> Option<&FunctionInfo> {
+//         self.fetch(key, C::get_function)
+//     }
+//     pub fn get_form(&self, key: FormIdx) -> Option<&FormInfo> {
+//         self.fetch(key, C::get_form)
+//     }
+//     pub fn get_event(&self, key: EventIdx) -> Option<&EventInfo> {
+//         self.fetch(key, C::get_event)
+//     }
+//     pub fn get_type(&self, key: TypeIdx) -> Option<&TypeInfo> {
+//         self.fetch(key, C::get_type)
+//     }
+//     pub fn get_external_variable(&self, key: ExternalVariableIdx) -> Option<&VariableInfo> {
+//         self.fetch(key, C::get_external_variable)
+//     }
+
+//     pub fn iter_functions(&self) -> impl Iterator<Item = (FunctionIdx, &FunctionInfo)> {
+//         self.components
+//             .iter()
+//             .flat_map(|(_, info)| info.iter_functions())
+//     }
+//     pub fn iter_forms(&self) -> impl Iterator<Item = (FormIdx, &FormInfo)> {
+//         self.components
+//             .iter()
+//             .flat_map(|(_, info)| info.iter_forms())
+//     }
+//     pub fn iter_events(&self) -> impl Iterator<Item = (EventIdx, &EventInfo)> {
+//         self.components
+//             .iter()
+//             .flat_map(|(_, info)| info.iter_events())
+//     }
+//     pub fn iter_types(&self) -> impl Iterator<Item = (TypeIdx, &TypeInfo)> {
+//         self.components
+//             .iter()
+//             .flat_map(|(_, info)| info.iter_types())
+//     }
+//     pub fn iter_variables(&self) -> impl Iterator<Item = (ExternalVariableIdx, &VariableInfo)> {
+//         self.components
+//             .iter()
+//             .flat_map(|(_, info)| info.iter_variables())
+//     }
+// }
+
+// pub struct DynamicComponent {
+//     this_idx: ComponentIdx,
+//     identifier: String,
+
+//     functions: Vec<FunctionInfo>,
+//     forms: Vec<FormInfo>,
+//     events: Vec<EventInfo>,
+//     types: Vec<TypeInfo>,
+//     variables: Vec<VariableInfo>,
+// }
+
+// impl DynamicComponent {
+//     pub fn new(idx: ComponentIdx, identifier: impl Into<String>) -> Self {
+//         Self {
+//             this_idx: idx,
+//             identifier: identifier.into(),
+
+//             functions: Default::default(),
+//             forms: Default::default(),
+//             events: Default::default(),
+//             types: Default::default(),
+//             variables: Default::default(),
+//         }
+//     }
+
+//     // pub fn insert_function(&mut self, func: FunctionInfo) -> FunctionIdx {
+//     //     let key = FunctionIdx(self.next_idx(&self.functions));
+//     //     self.functions.insert(key, func);
+//     //     key
+//     // }
+//     // pub fn insert_form(&mut self, form: FormInfo) -> FormIdx {
+//     //     let key = FormIdx(self.next_idx(&self.forms));
+//     //     self.forms.insert(key, form);
+//     //     key
+//     // }
+//     // pub fn insert_event(&mut self, event: EventInfo) -> EventIdx {
+//     //     let key = EventIdx(self.next_idx(&self.events));
+//     //     self.events.insert(key, event);
+//     //     key
+//     // }
+//     // pub fn insert_type(&mut self, type_: TypeInfo) -> TypeIdx {
+//     //     let key = TypeIdx(self.next_idx(&self.types));
+//     //     self.types.insert(key, type_);
+//     //     key
+//     // }
+//     // pub fn insert_variable(&mut self, var: VariableInfo) -> ExternalVariableIdx {
+//     //     let key = ExternalVariableIdx(self.next_idx(&self.variables));
+//     //     if let Some(form_idx) = var.owning_form {
+//     //         if let Some(form) = self.forms.get_mut(&form_idx) {
+//     //             let variables = &mut form.script.get_or_insert_with(Default::default).variables;
+//     //             let idx = InternalVariableIdx(variables.len() as u32);
+//     //             variables.insert(idx, key);
+//     //         }
+//     //     }
+//     //     self.variables.insert(key, var);
+//     //     key
+//     // }
+// }
+
+// impl Component for DynamicComponent {
+//     fn get_idx(&self) -> ComponentIdx {
+//         self.this_idx
+//     }
+
+//     fn identifier(&self) -> &str {
+//         &self.identifier
+//     }
+
+//     fn get_function(&self, key: FunctionIdx) -> Option<&FunctionInfo> {
+//         self.functions.get(&key)
+//     }
+//     fn get_form(&self, key: FormIdx) -> Option<&FormInfo> {
+//         self.forms.get(&key)
+//     }
+//     fn get_event(&self, key: EventIdx) -> Option<&EventInfo> {
+//         self.events.get(&key)
+//     }
+//     fn get_type(&self, key: TypeIdx) -> Option<&TypeInfo> {
+//         self.types.get(&key)
+//     }
+//     fn get_external_variable(&self, key: ExternalVariableIdx) -> Option<&VariableInfo> {
+//         self.variables.get(&key)
+//     }
+
+//     fn iter_functions(&self) -> impl Iterator<Item = (FunctionIdx, &FunctionInfo)> {
+//         self.functions.iter().map(|(&idx, info)| (idx, info))
+//     }
+//     fn iter_forms(&self) -> impl Iterator<Item = (FormIdx, &FormInfo)> {
+//         self.forms.iter().map(|(&idx, info)| (idx, info))
+//     }
+//     fn iter_events(&self) -> impl Iterator<Item = (EventIdx, &EventInfo)> {
+//         self.events.iter().map(|(&idx, info)| (idx, info))
+//     }
+//     fn iter_types(&self) -> impl Iterator<Item = (TypeIdx, &TypeInfo)> {
+//         self.types.iter().map(|(&idx, info)| (idx, info))
+//     }
+//     fn iter_variables(&self) -> impl Iterator<Item = (ExternalVariableIdx, &VariableInfo)> {
+//         self.variables.iter().map(|(&idx, info)| (idx, info))
+//     }
+// }
+
+pub trait Sources {
+    type Input<'a>
+    where
+        Self: 'a;
+
+    fn project_name(&self) -> &str;
+
+    fn iter_sources(&self) -> impl Iterator<Item = (SourceIdx, Self::Input<'_>)>;
+    fn get_source(&self, idx: SourceIdx) -> Option<Self::Input<'_>>;
+}
+
+pub struct Project<'a, S, F> {
+    pub sources: &'a S,
+    pub frontend: &'a mut F,
+}
+
+impl<'a, S: Sources, F: Frontend> Project<'a, S, F> {
+    pub fn new(sources: &'a S, frontend: &'a mut F) -> Self {
+        Self { sources, frontend }
+    }
+}
+
+pub trait LowerProject<R: ResourcesMut>: Sized {
+    type Input<'a>;
+
+    fn make_component_for<'a, S: 'a, F>(
         &mut self,
-        project: Project<'_, Self::Input, S, F>,
-        resources: &Resources<C>,
+        project: Project<'a, S, F>,
+        component: &mut R::InsertCx<'a>,
+    ) -> Result<(), StopToken>
+    where
+        S: Sources<Input<'a> = Self::Input<'a>>,
+        F: Frontend;
+
+    fn lower_scripts<'a, S: 'a, F>(
+        &mut self,
+        project: Project<'a, S, F>,
+        resources: &'a R,
         take_script: impl FnMut(Result<Script, StopToken>) -> Result<(), StopToken>,
-    ) -> Result<(), StopToken>;
+    ) -> Result<(), StopToken>
+    where
+        S: Sources<Input<'a> = Self::Input<'a>>,
+        F: Frontend;
 }

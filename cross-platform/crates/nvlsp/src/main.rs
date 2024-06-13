@@ -1,7 +1,6 @@
-use fir::{DiagnosticFilter, DiagnosticKind, DynamicComponent, TargetContext};
+use fir::{DiagnosticFilter, DiagnosticKind, TargetContext};
 use hashbrown::HashMap;
 use log::info;
-use lsp_server::{Message, Notification, Request};
 use lsp_types::{
     CodeActionKind, CodeActionOptions, CodeActionProviderCapability, CompletionOptions,
     DeclarationCapability, HoverProviderCapability, OneOf, RenameOptions, ServerCapabilities,
@@ -39,7 +38,7 @@ mod utils;
 
 pub(crate) use rust_sitter::tree_sitter;
 
-fn source_tcx() -> impl TargetContext<Component = DynamicComponent> {
+fn source_tcx() -> impl TargetContext<fir::TheResources> {
     fir_nvse::Context::default()
 }
 
@@ -93,7 +92,7 @@ fn main() -> anyhow::Result<()> {
             lets_through: DiagnosticKind::Warning(fir::Warning::BadPractice),
             suppressed_warnings: DiagnosticFilter::NO_WARNINGS,
         },
-        _marker: std::marker::PhantomData,
+        // _marker: std::marker::PhantomData,
     };
 
     loop {

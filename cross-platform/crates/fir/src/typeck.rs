@@ -3,7 +3,7 @@ use std::{iter, marker::PhantomData};
 use arrayvec::ArrayVec;
 
 use crate::{
-    utils::{TyHintPrinter, TyPrinter},
+    utils::{ResourcesExt, TyHintPrinter, TyPrinter},
     *,
 };
 
@@ -85,7 +85,7 @@ impl TypeckFailure {
         })
     }
 
-    pub fn into_diagnostic<C: Component>(self, res: &Resources<C>) -> TypeckFailureDiagnostic {
+    pub fn into_diagnostic<R: Resources>(self, res: &R) -> TypeckFailureDiagnostic {
         match self {
             TypeckFailure::TooFewArgs(hints) => {
                 TypeckFailureDiagnostic::TooFewArgs(hints.span_map(|h| h.len()))

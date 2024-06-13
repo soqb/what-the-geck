@@ -1,9 +1,13 @@
-use fir::DynamicComponent;
+use fir::{Insert, ResourcesMut};
 use hashbrown::HashMap;
 
 use crate::{ItemKind, Script};
 
-use super::{ascii::CaselessString, context::ScriptMetadata, LowerContext, LowerResources};
+use super::{
+    ascii::CaselessString,
+    context::{Case, ScriptMetadata},
+    LowerContext, LowerResources,
+};
 
 struct ScriptCache {
     pub tree: rust_sitter::tree_sitter::Tree,
@@ -16,15 +20,19 @@ pub struct Geckscript {
     script_meta: HashMap<fir::SourceIdx, ScriptCache>,
 }
 
-impl<'a> fir::LowerProject<'a, DynamicComponent> for Geckscript {
-    type Input = &'a str;
+impl<R: ResourcesMut> fir::LowerProject<R> for Geckscript {
+    type Input<'a> = &'a str;
 
-    fn make_component_for<S: fir::Sources<Self::Input>, F: fir::Frontend>(
+    fn make_component_for<'a, S: 'a, F>(
         &mut self,
-        project: fir::Project<'_, Self::Input, S, F>,
-        component_idx: fir::ComponentIdx,
-    ) -> fir::Result<DynamicComponent, fir::StopToken> {
-        let mut component = DynamicComponent::new(component_idx, project.sources.project_name());
+        project: fir::Project<'a, S, F>,
+        component: &mut R::InsertCx<'a>,
+    ) -> Result<(), fir::StopToken>
+    where
+        S: fir::Sources<Input<'a> = Self::Input<'a>>,
+        F: fir::Frontend,
+    {
+        // let mut component = DynamicComponent::new(component_idx, project.sources.project_name());
         for (idx, source) in project.sources.iter_sources() {
             let (tree, ast, errors) = crate::parse::<Script, Script>(None, source);
             project.frontend.report_all(errors)?;
@@ -34,6 +42,8 @@ impl<'a> fir::LowerProject<'a, DynamicComponent> for Geckscript {
                 let ItemKind::Variables(vars) = &item.value.kind else {
                     continue;
                 };
+
+                super::context::ck_token_case(project.frontend, source, &vars.ty, Case::Lowercase)?;
 
                 super::iter_lowered_variables(vars)
                     .map(|var| fir::VariableInfo {
@@ -45,7 +55,7 @@ impl<'a> fir::LowerProject<'a, DynamicComponent> for Geckscript {
                     })
                     .for_each(|var| {
                         let key = CaselessString::new(var.name.ident.clone());
-                        let idx = component.insert_variable(var);
+                        let idx = component.insert_external_variable(var);
                         meta.internal_variable_name_map.insert(key, idx);
                     });
             }
@@ -53,21 +63,23 @@ impl<'a> fir::LowerProject<'a, DynamicComponent> for Geckscript {
             let cache = ScriptCache { ast, meta, tree };
             self.script_meta.insert(idx, cache);
         }
-        Ok(component)
+        Ok(())
     }
 
-    fn lower_scripts<S: fir::Sources<Self::Input>, F: fir::Frontend>(
+    fn lower_scripts<'a, S: 'a, F>(
         &mut self,
-        project: fir::Project<'_, Self::Input, S, F>,
-        resources: &fir::Resources<DynamicComponent>,
-        mut take_script: impl FnMut(
-            fir::Result<fir::Script, fir::StopToken>,
-        ) -> Result<(), fir::StopToken>,
-    ) -> Result<(), fir::StopToken> {
+        project: fir::Project<'a, S, F>,
+        resources: &'a R,
+        mut take_script: impl FnMut(Result<fir::Script, fir::StopToken>) -> Result<(), fir::StopToken>,
+    ) -> Result<(), fir::StopToken>
+    where
+        S: fir::Sources<Input<'a> = Self::Input<'a>>,
+        F: fir::Frontend,
+    {
         let lower_resources = LowerResources::build_from_resources(resources);
-        for (source, _) in project.sources.iter_sources() {
-            let ScriptCache { tree, ast, meta } = self.script_meta.remove(&source).unwrap();
-            let cx = LowerContext::new(&lower_resources, project.frontend, &meta);
+        for (source, src) in project.sources.iter_sources() {
+            let ScriptCache { tree: _, ast, meta } = self.script_meta.remove(&source).unwrap();
+            let cx = LowerContext::new(&lower_resources, project.frontend, &meta, src);
             let val = cx.lower_script(ast);
             take_script(val)?;
         }

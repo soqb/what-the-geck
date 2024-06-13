@@ -11,7 +11,7 @@ fir = { path = "../fir" }
 hashbrown = "0.14.1"
 indexmap = "2.0.0"
 lazy_static = "1.4.0"
-miette = "5.10.0"
+miette = "7.2.0"
 thiserror = "1.0.47"
 wasm-encoder = "0.32.0"
 wasmparser = "0.112.0"

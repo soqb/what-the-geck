@@ -164,15 +164,29 @@ impl fmt::Display for TyHintPrinter {
     }
 }
 
-impl<C: Component> Resources<C> {
-    pub fn print_name(&self, name: &Name, idx: impl Into<ComponentIdx>) -> NamePrinter {
+pub trait ResourcesExt: Resources {
+    fn print_name(&self, name: &Name) -> NamePrinter;
+    fn print_ty(&self, ty: impl Into<Tried<Ty>>) -> TyPrinter;
+    fn print_ty_hint(&self, hint: TyHint) -> TyHintPrinter;
+    fn get_function_definition(&self, func_idx: FunctionIdx) -> Option<&FunctionDefinition> {
+        match &self.get_function(func_idx)?.reference {
+            FunctionReference::Defined(def) => Some(def),
+            &FunctionReference::Alias { aliased_function } => {
+                self.get_function_definition(aliased_function)
+            }
+        }
+    }
+}
+
+impl<R: Resources> ResourcesExt for R {
+    fn print_name(&self, name: &Name) -> NamePrinter {
         NamePrinter {
             ident: name.ident.clone(),
-            component_name: self.component(idx.into()).unwrap().identifier().to_owned(),
+            component_name: "".to_owned(),
         }
     }
 
-    pub fn print_ty(&self, ty: impl Into<Tried<Ty>>) -> TyPrinter {
+    fn print_ty(&self, ty: impl Into<Tried<Ty>>) -> TyPrinter {
         match ty.into() {
             Resolved(Ty::Unit) => TyPrinter::Unit,
             Resolved(Ty::String) => TyPrinter::String,
@@ -183,19 +197,15 @@ impl<C: Component> Resources<C> {
             Resolved(Ty::Ref(RefTy::Object(form))) => TyPrinter::ObjectRef(form),
             Resolved(Ty::Ref(RefTy::Form(form))) => TyPrinter::FormRef(form),
             Resolved(Ty::Adt(idx)) => match self.get_type(idx) {
-                Some(ty_def) => TyPrinter::FoundAdt(self.print_name(&ty_def.name, idx)),
+                Some(ty_def) => TyPrinter::FoundAdt(self.print_name(&ty_def.name)),
                 None => TyPrinter::UnknownAdt(idx),
             },
             Unresolvable => TyPrinter::Unresolvable,
         }
     }
 
-    pub fn print_ty_hint(&self, hint: TyHint) -> TyHintPrinter {
-        fn fold_names<C: Component>(
-            this: &Resources<C>,
-            names: &mut Vec<TyPrinter>,
-            union: &[TyHint],
-        ) {
+    fn print_ty_hint(&self, hint: TyHint) -> TyHintPrinter {
+        fn fold_names(this: &impl Resources, names: &mut Vec<TyPrinter>, union: &[TyHint]) {
             for hint in union {
                 match hint {
                     TyHint::Never => (),

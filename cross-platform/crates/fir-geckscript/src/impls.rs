@@ -157,7 +157,7 @@ impl IntoIterator for IfChain {
     fn into_iter(self) -> Self::IntoIter {
         IfChainIter {
             triplet: Some((
-                self.kw_if.span(),
+                self.kw_if.span.span(),
                 self.condition,
                 self.statements,
                 *self.next,
@@ -184,7 +184,7 @@ impl Iterator for IfChainIter {
         let (span, expr, stmts, next) = self.triplet.take()?;
         self.triplet = match next {
             NextIf::ElseIf(else_if) => Some((
-                else_if.kw_elseif.span(),
+                else_if.kw_elseif.span.span(),
                 else_if.condition,
                 else_if.statements,
                 *else_if.next,

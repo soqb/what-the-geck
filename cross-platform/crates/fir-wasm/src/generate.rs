@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use fir::*;
+use fir::{utils::ResourcesExt as _, *};
 
 use wasm_encoder::{BlockType, ConstExpr, Instruction, RefType, ValType};
 
@@ -31,7 +31,7 @@ pub fn const_expr_zero(val: ValType) -> ConstExpr {
     }
 }
 
-impl<'s, 'ctx: 's, F: Frontend, C: Component> CodeBuilder<'ctx, 's, F, C> {
+impl<'s, 'ctx: 's, F: Frontend, R: Resources> CodeBuilder<'ctx, 's, F, R> {
     fn lower_pv(&mut self, p: &PrimitiveValue) -> Result<()> {
         match p {
             PrimitiveValue::NullReference => self.instruction(Instruction::I32Const(0)),
@@ -59,16 +59,12 @@ impl<'s, 'ctx: 's, F: Frontend, C: Component> CodeBuilder<'ctx, 's, F, C> {
                         name: Cow::Borrowed("resolve_formid"),
                     },
                     WasmTypeDef {
-                        params: vec![ValType::I32; 2],
+                        params: vec![ValType::I64],
                         results: vec![ValType::I32],
                     },
                 );
 
-                let cmp_i = ComponentIdx::from(form_idx).0;
-                let form_i = form_idx.0 as u32;
-
-                self.instruction(Instruction::I32Const(cmp_i as i32));
-                self.instruction(Instruction::I32Const(form_i as i32));
+                self.instruction(Instruction::I64Const(u64::from(form_idx) as i64));
                 self.instruction(Instruction::Call(func_idx));
             }
             Expression::GetVariable(Unresolvable) => {
@@ -223,7 +219,6 @@ impl<'s, 'ctx: 's, F: Frontend, C: Component> CodeBuilder<'ctx, 's, F, C> {
                                     Vec::new()
                                 }
                             };
-                            println!("{func:?}");
                             let params = func
                                 .self_param
                                 .as_ref()
@@ -390,7 +385,6 @@ impl<'s, 'ctx: 's, F: Frontend, C: Component> CodeBuilder<'ctx, 's, F, C> {
             fir::BranchTarget::Break { .. }
             | fir::BranchTarget::Return
             | fir::BranchTarget::Unreachable => {
-                println!("yahaha");
                 self.instruction(Instruction::Block(BlockType::Empty))
             }
             fir::BranchTarget::Loop => self.instruction(Instruction::Loop(BlockType::Empty)),
@@ -412,7 +406,7 @@ impl<'s, 'ctx: 's, F: Frontend, C: Component> CodeBuilder<'ctx, 's, F, C> {
     }
 }
 
-impl<'a, F: Frontend, C: Component> ModuleBuilder<'a, F, C> {
+impl<'a, F: Frontend, R: Resources> ModuleBuilder<'a, F, R> {
     fn push_and_export_function(
         &mut self,
         function: Option<wasm_encoder::Function>,
@@ -457,10 +451,7 @@ impl<'a, F: Frontend, C: Component> ModuleBuilder<'a, F, C> {
                     if let Some(func) = func {
                         self.push_and_export_function(
                             Some(func),
-                            Cow::Owned(format!(
-                                "on:{}",
-                                self.bg.res.print_name(&event_def.name, event_idx)
-                            )),
+                            Cow::Owned(format!("on:{}", self.bg.res.print_name(&event_def.name))),
                             Vec::new(),
                             Vec::new(),
                         );

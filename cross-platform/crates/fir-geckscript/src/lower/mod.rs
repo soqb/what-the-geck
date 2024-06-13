@@ -1,6 +1,6 @@
 use fir::typeck::LocalResources;
 use fir::Tried::{self, Resolved, Unresolvable};
-use fir::{typeck, ConversionReason, Frontend, Ty};
+use fir::{typeck, utils::ResourcesExt as _, ConversionReason, Frontend, Resources, Ty};
 use fir::{Span, Spanned, ToSpan};
 
 use rust_sitter::Spanned as AstSpanned;
@@ -70,7 +70,7 @@ impl Coercibility {
     }
 }
 
-impl<'a, F: Frontend + 'a> LowerContext<'a, F> {
+impl<'a, F: Frontend + 'a, R: Resources> LowerContext<'a, F, R> {
     fn lower_literal(&mut self, literal: Literal, span: Span) -> fir::Expression {
         let pv = match literal {
             Literal::DecInt(IntRepr::Good(x)) | Literal::HexInt(IntRepr::Good(x)) => {
@@ -340,7 +340,7 @@ impl<'a, F: Frontend + 'a> LowerContext<'a, F> {
                             .scan(false, |cancel_flag, arg_res| {
                                 match (*cancel_flag, arg_res) {
                                     (true, _) => None,
-                                    (false, Err(fir::StopToken)) => {
+                                    (false, Err(fir::StopToken { .. })) => {
                                         *cancel_flag = true;
                                         None
                                     }
@@ -925,21 +925,54 @@ impl<'a, F: Frontend + 'a> LowerContext<'a, F> {
     ) -> Result<Spanned<fir::Statement>> {
         let stmt = match stmt {
             StatementKind::If(chain) => {
-                let mut iter = chain.into_iter();
+                self.ck_token_case(&chain.kw_if.span)?;
+
                 let mut containing_block = fir::Block {
                     statements: Vec::new(),
                     termination: fir::BranchTarget::Break { depth: 0 },
                 };
 
-                for (span, condition, code) in iter.by_ref() {
-                    let inner_block = self.lower_conditional(span, condition, code)?;
-                    containing_block
-                        .statements
-                        .push(inner_block.span_map(fir::Statement::Block));
-                }
+                let mut next_block = *chain.next;
+                loop {
+                    match next_block {
+                        NextIf::ElseIf(ElseIf {
+                            kw_elseif,
+                            condition,
+                            leading_newline: _,
+                            statements,
+                            next,
+                        }) => {
+                            self.ck_token_case(&kw_elseif.span)?;
 
-                if let Some(else_) = iter.else_branch() {
-                    self.lower_block_inline(else_.statements)?;
+                            let inner_block = self.lower_conditional(
+                                kw_elseif.span.span(),
+                                condition,
+                                statements,
+                            )?;
+                            containing_block
+                                .statements
+                                .push(inner_block.span_map(fir::Statement::Block));
+
+                            next_block = *next;
+                        }
+                        NextIf::Else(Else {
+                            kw_else,
+                            leading_newline: _,
+                            statements,
+                            kw_end_if,
+                        }) => {
+                            self.ck_token_case(&kw_else.span)?;
+                            self.ck_token_case(&kw_end_if.span)?;
+
+                            self.lower_block_inline(statements)?;
+
+                            break;
+                        }
+                        NextIf::End(kw_end_if) => {
+                            self.ck_token_case(&kw_end_if.span)?;
+                            break;
+                        }
+                    }
                 }
 
                 fir::Statement::Block(containing_block)
@@ -988,7 +1021,15 @@ impl<'a, F: Frontend + 'a> LowerContext<'a, F> {
 
                 // return Ok(ControlFlow::Break((termination, next_block)));
             }
-            StatementKind::Set { var, value, .. } => {
+            StatementKind::Set {
+                var,
+                value,
+                kw_set,
+                kw_to,
+            } => {
+                self.ck_token_case(&kw_set.span)?;
+                self.ck_token_case(&kw_to.span)?;
+
                 self.lower_set(var, value, |_, x, _| Ok(x.into_inner()))?
             }
             StatementKind::Variables(_) => {
@@ -998,12 +1039,18 @@ impl<'a, F: Frontend + 'a> LowerContext<'a, F> {
                 var,
                 assignment,
                 value,
-                ..
-            } => self.lower_set(var, value, Self::map_let_expression(assignment))?,
-            StatementKind::Return(_) => fir::Statement::Branch {
-                kind: fir::BranchKind::Unconditional,
-                target: fir::BranchTarget::Return,
-            },
+                kw_let,
+            } => {
+                self.ck_token_case(&kw_let.span)?;
+                self.lower_set(var, value, Self::map_let_expression(assignment))?
+            }
+            StatementKind::Return(kw_return) => {
+                self.ck_token_case(&kw_return.span)?;
+                fir::Statement::Branch {
+                    kind: fir::BranchKind::Unconditional,
+                    target: fir::BranchTarget::Return,
+                }
+            }
             StatementKind::Expression(e) => fir::Statement::Express(
                 self.lower_expression(AstSpanned {
                     value: e,
@@ -1038,6 +1085,9 @@ impl<'a, F: Frontend + 'a> LowerContext<'a, F> {
         mut consume_event_impl: impl FnMut(fir::Spanned<fir::EventImpl>),
         mut consume_ufd: impl FnMut(fir::Spanned<fir::UserFunctionDefinition>),
     ) -> Result<()> {
+        self.ck_token_case(&item.kw_begin.span)?;
+        self.ck_token_case(&item.block.end.span)?;
+
         let name_span = item.name.span();
         let item = match item.args {
             // todo: function defintiions

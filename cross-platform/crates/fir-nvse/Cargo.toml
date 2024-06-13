@@ -12,6 +12,8 @@ fir = { version = "0.1.0", path = "../fir" }
 hashbrown = "0.14.0"
 indexmap = "2.0.0"
 lazy_static = "1.4.0"
+miette = "7.2.0"
 nv-types = { version = "0.1.0", path = "../nv-types" }
 psyker = { version = "0.1.0", path = "../psyker" }
 ron = "0.8.1"
+thiserror = "1.0.61"

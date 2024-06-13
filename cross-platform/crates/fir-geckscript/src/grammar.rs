@@ -15,50 +15,72 @@ mod grammar {
     #[derive(Debug, Clone)]
     pub struct Gibberish;
 
-    #[rust_sitter::prec(1)]
-    #[rust_sitter::leaf(pattern = r"(?i)if")]
     #[derive(Debug, Clone)]
-    pub struct KwIf;
-    #[rust_sitter::leaf(pattern = r"(?i)elseif")]
-    #[rust_sitter::prec(1)]
+    pub struct KwIf {
+        #[rust_sitter::prec(1)]
+        #[rust_sitter::leaf(pattern = r"(?i)if")]
+        pub span: Spanned<()>,
+    }
     #[derive(Debug, Clone)]
-    pub struct KwElseIf;
-    #[rust_sitter::leaf(pattern = r"(?i)else")]
-    #[rust_sitter::prec(1)]
+    pub struct KwElseIf {
+        #[rust_sitter::leaf(pattern = r"(?i)elseif")]
+        #[rust_sitter::prec(1)]
+        pub span: Spanned<()>,
+    }
     #[derive(Debug, Clone)]
-    pub struct KwElse;
-    #[rust_sitter::leaf(pattern = r"(?i)endif")]
-    #[rust_sitter::prec(1)]
+    pub struct KwElse {
+        #[rust_sitter::leaf(pattern = r"(?i)else")]
+        #[rust_sitter::prec(1)]
+        pub span: Spanned<()>,
+    }
     #[derive(Debug, Clone)]
-    pub struct KwEndIf;
-    #[rust_sitter::leaf(pattern = r"(?i)return")]
-    #[rust_sitter::prec(1)]
+    pub struct KwEndIf {
+        #[rust_sitter::leaf(pattern = r"(?i)endif")]
+        #[rust_sitter::prec(1)]
+        pub span: Spanned<()>,
+    }
     #[derive(Debug, Clone)]
-    pub struct KwReturn;
-    #[rust_sitter::leaf(pattern = r"(?i)set")]
-    #[rust_sitter::prec(1)]
+    pub struct KwReturn {
+        #[rust_sitter::leaf(pattern = r"(?i)return")]
+        #[rust_sitter::prec(1)]
+        pub span: Spanned<()>,
+    }
     #[derive(Debug, Clone)]
-    pub struct KwSet;
-    #[rust_sitter::leaf(pattern = r"(?i)to")]
-    #[rust_sitter::prec(1)]
+    pub struct KwSet {
+        #[rust_sitter::leaf(pattern = r"(?i)set")]
+        #[rust_sitter::prec(1)]
+        pub span: Spanned<()>,
+    }
     #[derive(Debug, Clone)]
-    pub struct KwTo;
-    #[rust_sitter::leaf(pattern = r"(?i)begin")]
-    #[rust_sitter::prec(1)]
+    pub struct KwTo {
+        #[rust_sitter::leaf(pattern = r"(?i)to")]
+        #[rust_sitter::prec(1)]
+        pub span: Spanned<()>,
+    }
     #[derive(Debug, Clone)]
-    pub struct KwBegin;
-    #[rust_sitter::leaf(pattern = r"(?i)end")]
-    #[rust_sitter::prec(1)]
+    pub struct KwBegin {
+        #[rust_sitter::leaf(pattern = r"(?i)begin")]
+        #[rust_sitter::prec(1)]
+        pub span: Spanned<()>,
+    }
     #[derive(Debug, Clone)]
-    pub struct KwEnd;
-    #[rust_sitter::leaf(pattern = r"(?i)let")]
-    #[rust_sitter::prec(1)]
+    pub struct KwEnd {
+        #[rust_sitter::leaf(pattern = r"(?i)end")]
+        #[rust_sitter::prec(1)]
+        pub span: Spanned<()>,
+    }
     #[derive(Debug, Clone)]
-    pub struct KwLet;
-    #[rust_sitter::leaf(pattern = r"(?i)scn|scriptname")]
-    #[rust_sitter::prec(1)]
+    pub struct KwLet {
+        #[rust_sitter::leaf(pattern = r"(?i)let")]
+        #[rust_sitter::prec(1)]
+        pub span: Spanned<()>,
+    }
     #[derive(Debug, Clone)]
-    pub struct KwScriptName;
+    pub struct KwScriptName {
+        #[rust_sitter::leaf(pattern = r"(?i)scn|scriptname")]
+        #[rust_sitter::prec(1)]
+        pub span: Spanned<()>,
+    }
     #[rust_sitter::leaf(pattern = r"\(")]
     #[derive(Debug, Clone)]
     pub struct LeftParen;
@@ -296,7 +318,7 @@ mod grammar {
 
     #[derive(Debug, Clone)]
     pub struct Else {
-        pub kw_else: Spanned<KwElse>,
+        pub kw_else: KwElse,
         pub leading_newline: ForgivingNewline,
         pub statements: Vec<Statement>,
         pub kw_end_if: KwEndIf,
@@ -304,7 +326,7 @@ mod grammar {
 
     #[derive(Debug, Clone)]
     pub struct ElseIf {
-        pub kw_elseif: Spanned<KwElseIf>,
+        pub kw_elseif: KwElseIf,
         pub condition: Spanned<Expression>,
         pub leading_newline: ForgivingNewline,
         pub statements: Vec<Statement>,
@@ -313,7 +335,7 @@ mod grammar {
 
     #[derive(Debug, Clone)]
     pub struct IfChain {
-        pub kw_if: Spanned<KwIf>,
+        pub kw_if: KwIf,
         pub condition: Spanned<Expression>,
         pub leading_newline: ForgivingNewline,
         pub statements: Vec<Statement>,

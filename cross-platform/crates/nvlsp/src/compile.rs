@@ -2,9 +2,10 @@ use std::{borrow::Cow, cell::RefCell, pin::Pin};
 
 use fir::{
     typeck::{self, LocalResources, TyHint, TypeckEngine, TypeckResult},
-    Block, BranchKind, ConversionReason, Diagnostic, DiagnosticKind, DynamicComponent, EventImpl,
+    utils::ResourcesExt as _,
+    Block, BranchKind, ComponentInfo, ConversionReason, Diagnostic, DiagnosticKind, EventImpl,
     Expression, Frontend, FunctionBody, InternalVariableIdx, LowerProject, Operator, Resources,
-    Span, Spanned, Statement, TargetContext, ToSpan,
+    ResourcesMut, Span, Spanned, Statement, StopToken, TargetContext, TheResources, ToSpan,
     Tried::{self, Resolved, Unresolvable},
     Ty, UserFunctionDefinition, VariableInfo, Warning,
 };
@@ -31,40 +32,52 @@ impl Frontend for NvlspFrontend {
     }
 }
 
-struct Sources<'a> {
-    unchanged_documents: Vec<&'a TextDocument>,
-    changed_documents: Vec<&'a mut TextDocument>,
+pub struct Sources<'a> {
+    pub unchanged_documents: Vec<&'a TextDocument>,
+    pub changed_documents: Vec<&'a TextDocument>,
 }
 
-impl<'a> fir::Sources<&'a str> for Sources<'a> {
+impl<'a> fir::Sources for Sources<'a> {
+    type Input<'b> = &'b str where Self: 'b;
     fn project_name(&self) -> &str {
         "idk bro"
     }
 
-    fn iter_sources(&self) -> impl Iterator<Item = (fir::SourceIdx, &'a str)> {
+    fn iter_sources(&self) -> impl Iterator<Item = (fir::SourceIdx, &'_ str)> {
         self.unchanged_documents
             .iter()
-            .copied()
-            .chain(self.changed_documents.iter().map(|t| &**t))
+            .map(|doc| doc.text.as_str())
+            .chain(self.changed_documents.iter().map(|doc| doc.text.as_str()))
             .enumerate()
-            .map(|(i, d)| (fir::SourceIdx(i as u64), d.text.as_ref()))
+            .map(|(i, text)| (fir::SourceIdx(i as u64), text))
     }
 
-    fn get_source(&self, idx: fir::SourceIdx) -> Option<&'a str> {
-        todo!()
+    fn get_source(&self, idx: fir::SourceIdx) -> Option<&'_ str> {
+        let idx = idx.0 as usize;
+        if let Some(idx) = idx.checked_sub(self.unchanged_documents.len()) {
+            self.changed_documents.get(idx).map(|doc| doc.text.as_str())
+        } else {
+            self.unchanged_documents
+                .get(idx)
+                .map(|doc| doc.text.as_str())
+        }
     }
 }
 
 pub struct CompilerState {
-    resources: Resources<DynamicComponent>,
+    resources: TheResources,
+    frontend: NvlspFrontend,
 }
 
 impl CompilerState {
-    pub fn new(tcx: impl TargetContext<Component = DynamicComponent>) -> anyhow::Result<Self> {
-        let mut resources = Resources::default();
-        let idx = resources.next_component_idx();
-        resources.install_component(tcx.build_component(idx)?);
-        Ok(Self { resources })
+    pub fn new(tcx: impl TargetContext<TheResources>) -> Result<Self, StopToken> {
+        let mut resources = TheResources::default();
+        let mut frontend = NvlspFrontend::default();
+        tcx.install(&mut frontend, &mut resources)?;
+        Ok(Self {
+            resources,
+            frontend,
+        })
     }
 }
 
@@ -72,7 +85,6 @@ pub struct Compiler<'a> {
     state: &'a mut CompilerState,
     sources: Sources<'a>,
     instance: Geckscript,
-    frontend: NvlspFrontend,
 }
 
 fn seek<'a>(c: &mut tree_sitter::TreeCursor<'_>, d: usize, src: &'a str) {
@@ -148,50 +160,58 @@ impl<'a> Compiler<'a> {
             state,
             sources,
             instance: Default::default(),
-            frontend: NvlspFrontend::default(),
         }
     }
 
-    pub fn preprocess(&mut self) {
-        let project = fir::Project::new(&self.sources, &mut self.frontend);
-        self.instance.make_component_for();
-    }
-
-    pub fn compile(
-        &self,
-        old_syntax_tree: Option<&tree_sitter::Tree>,
-        source: &str,
-    ) -> (
-        tree_sitter::Tree,
-        Vec<Box<dyn Diagnostic>>,
-        Option<(fir::Script, HashMap<InternalVariableIdx, VariableInfo>)>,
-    ) {
-        let mut frontend = NvlspFrontend {
-            diagnostics: Vec::new(),
+    pub fn preprocess_scripts(&mut self) -> Result<(), fir::StopToken> {
+        let project = fir::Project::new(&self.sources, &mut self.state.frontend);
+        let info = ComponentInfo {
+            identifier: "scripts-aggregate".to_owned(),
+            ..Default::default()
         };
-
-        let (syntax_tree, ast, parse_errors) = fir_geckscript::parse::<
-            fir_geckscript::Script,
-            fir_geckscript::Script,
-        >(old_syntax_tree, source);
-
-        if syntax_tree.root_node().has_error() {
-            let mut c = syntax_tree.walk();
-            seek(&mut c, 0, source);
-        }
-
-        // ignore `StopToken`s since our frontend never produces them.
-        let _ = frontend.report_all(parse_errors);
-
-        let script_result = self.state.with_lower_resources(|r| {
-            fir_geckscript::lower::lower_script(r, ast, &mut frontend).ok()
-        });
-        (
-            syntax_tree,
-            frontend.diagnostics,
-            script_result.map(|(script, vars)| (script, vars.collect())),
+        let mut component = self.state.resources.new_component_cx(info);
+        <_ as LowerProject<fir::TheResources>>::make_component_for(
+            &mut self.instance,
+            project,
+            &mut component,
         )
     }
+
+    // pub fn compile(
+    //     &self,
+    //     old_syntax_tree: Option<&tree_sitter::Tree>,
+    //     source: &str,
+    // ) -> (
+    //     tree_sitter::Tree,
+    //     Vec<Box<dyn Diagnostic>>,
+    //     Option<(fir::Script, HashMap<InternalVariableIdx, VariableInfo>)>,
+    // ) {
+    //     let mut frontend = NvlspFrontend {
+    //         diagnostics: Vec::new(),
+    //     };
+
+    //     let (syntax_tree, ast, parse_errors) = fir_geckscript::parse::<
+    //         fir_geckscript::Script,
+    //         fir_geckscript::Script,
+    //     >(old_syntax_tree, source);
+
+    //     if syntax_tree.root_node().has_error() {
+    //         let mut c = syntax_tree.walk();
+    //         seek(&mut c, 0, source);
+    //     }
+
+    //     // ignore `StopToken`s since our frontend never produces them.
+    //     let _ = frontend.report_all(parse_errors);
+
+    //     let script_result = self.state.with_lower_resources(|r| {
+    //         fir_geckscript::lower::lower_script(r, ast, &mut frontend).ok()
+    //     });
+    //     (
+    //         syntax_tree,
+    //         frontend.diagnostics,
+    //         script_result.map(|(script, vars)| (script, vars.collect())),
+    //     )
+    // }
 
     pub fn analyze(
         &mut self,
@@ -230,23 +250,23 @@ impl Diagnostic for CkDiagnostic {
     }
 }
 
-pub(crate) struct Cker<'a, F> {
+pub(crate) struct Cker<'a, F, R> {
     pub script: &'a fir::Script,
     pub current_body: Option<&'a fir::FunctionBody>,
-    pub resources: &'a Resources<DynamicComponent>,
+    pub resources: &'a R,
     pub internal_variables: &'a HashMap<InternalVariableIdx, VariableInfo>,
     pub symbols: SpanMap<Symbol>,
     pub report: F,
 }
 
-impl<'a, F: FnMut(Box<dyn Diagnostic>)> Cker<'a, F> {
+impl<'a, F: FnMut(Box<dyn Diagnostic>), R: Resources> Cker<'a, F, R> {
     fn report(&mut self, d: impl Diagnostic + 'static) {
         (self.report)(Box::new(d) as Box<dyn Diagnostic>)
     }
 
     pub fn report_typeck_failures(&mut self, failures: Vec<typeck::TypeckFailure>) {
         for failure in failures {
-            self.report(failure.into_diagnostic(&self.resources));
+            self.report(failure.into_diagnostic(self.resources));
         }
     }
 
@@ -452,7 +472,7 @@ impl<'a, F: FnMut(Box<dyn Diagnostic>)> Cker<'a, F> {
         }
     }
 
-    pub fn ck_block(&mut self, block: &'a Block) {
+    pub fn ck_block(&mut self, block: &Block) {
         for stmt in &block.statements {
             self.ck_statement(stmt.inner(), stmt.to_span());
         }
@@ -477,7 +497,7 @@ impl<'a, F: FnMut(Box<dyn Diagnostic>)> Cker<'a, F> {
     }
 }
 
-impl<'a, F> typeck::LocalResources for Cker<'a, F> {
+impl<'a, F, R: Resources> typeck::LocalResources for Cker<'a, F, R> {
     fn get_form(&self, idx: fir::FormIdx) -> Option<&fir::FormInfo> {
         self.resources.get_form(idx)
     }

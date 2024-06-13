@@ -50,7 +50,7 @@ pub enum ParamType {
     Container = 0x1A,
     WorldSpace = 0x1B,
     CrimeType = 0x1C,
-    AIPackage = 0x1D,
+    AiPackage = 0x1D,
     CombatStyle = 0x1E,
     MagicEffect = 0x1F,
     FormType = 0x20,
@@ -99,7 +99,7 @@ pub enum ParamType {
     Region = 0x45,
 
     // nvse
-    NVSEArray = 0x100,
+    NvseArray = 0x100,
 }
 
 impl ParamType {

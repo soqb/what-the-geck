@@ -40,6 +40,5 @@ impl Diagnostic for TreeSitterError {
 pub fn parse(source: &str, edited_old_tree: Option<&Tree>) -> Result<Tree> {
     let mut parser = Parser::new();
     parser.set_language(tree_sitter_geckscript::language())?;
-    parser.set_logger(Some(Box::new(|t, m| println!("{t}: {m}"))));
     Ok(parser.parse(source, edited_old_tree).unwrap())
 }
