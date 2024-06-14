@@ -76,6 +76,7 @@ impl<R: ResourcesMut> fir::LowerProject<R> for Geckscript {
         S: fir::Sources<Input<'a> = Self::Input<'a>>,
         F: fir::Frontend,
     {
+        let start = std::time::Instant::now();
         let lower_resources = LowerResources::build_from_resources(resources);
         for (source, src) in project.sources.iter_sources() {
             let ScriptCache { tree: _, ast, meta } = self.script_meta.remove(&source).unwrap();

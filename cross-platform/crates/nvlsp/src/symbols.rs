@@ -1,20 +1,20 @@
 use core::fmt;
 use std::borrow::Cow;
 
-use fir::{Component, DynamicComponent, FunctionDefinition, Resources, Ty};
+use fir::{utils::ResourcesExt as _, FunctionDefinition, Resources, Ty};
 use lsp_types::{HoverContents, MarkupContent, MarkupKind};
 
 use crate::context::{Symbol, SymbolKind};
 
-struct DisplaySignature<'a> {
+struct DisplaySignature<'a, R> {
     aliased: bool,
-    resources: &'a Resources<DynamicComponent>,
+    resources: &'a R,
     component_name: &'a str,
     name: &'a str,
     def: &'a FunctionDefinition,
 }
 
-impl<'a> fmt::Display for DisplaySignature<'a> {
+impl<'a, R: Resources> fmt::Display for DisplaySignature<'a, R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let arg_count = self.def.params.len() + self.def.self_param.is_some() as u8 as usize;
 
@@ -77,9 +77,9 @@ impl<'a> fmt::Display for DisplaySignature<'a> {
 }
 
 impl Symbol {
-    pub fn into_hover_contents(&self, resources: &Resources<DynamicComponent>) -> HoverContents {
+    pub fn into_hover_contents(&self, resources: &impl Resources) -> HoverContents {
         fn get_func_def(
-            resources: &fir::Resources<DynamicComponent>,
+            resources: &impl Resources,
             idx: fir::FunctionIdx,
             aliased: bool,
         ) -> Option<(bool, &fir::Name, &fir::FunctionDefinition)> {
@@ -103,12 +103,12 @@ impl Symbol {
             &SymbolKind::Function(idx) => {
                 // todo: fetch & cache docs from the geck wiki...
                 let (aliased, name, def) = get_func_def(resources, idx, false).unwrap();
-                let component_name = resources.component(idx.into()).unwrap().identifier();
+                // let component_name = resources.component(idx.into()).unwrap().identifier();
                 let signature = DisplaySignature {
                     aliased,
                     def,
                     resources,
-                    component_name,
+                    component_name: "fixme",
                     name: &name.ident,
                 };
                 let value = format!("woah!\n```rust\n{signature}\n```");

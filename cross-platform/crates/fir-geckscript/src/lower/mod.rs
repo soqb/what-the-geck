@@ -377,7 +377,7 @@ impl<'a, F: Frontend + 'a, R: Resources> LowerContext<'a, F, R> {
                 )))),
                 None,
             )
-        } else if let Some((global_idx, warn)) = self.global_variable(first.as_deref()) {
+        } else if let Some((global_idx, warn)) = self.variable(None, first.as_deref()) {
             self.report_all(warn)?;
             (
                 Some(
@@ -387,23 +387,18 @@ impl<'a, F: Frontend + 'a, R: Resources> LowerContext<'a, F, R> {
                 ),
                 None,
             )
-        } else if let Ok((form_idx, form_variables, warn)) = self.form(first.as_deref()) {
+        } else if let Ok((form_idx, warn)) = self.form(first.as_deref()) {
             let pair = match (idents.next(), invoke.args.is_empty()) {
                 (Some(field_name), true) => {
                     let field_name = field_name.respan();
-                    match Self::field_of(first.to_span().of(form_variables), field_name.as_deref())
-                    {
-                        Ok((_, var_idx, warn)) => {
+                    match self.variable(Some(form_idx), field_name.as_deref()) {
+                        Some((var_idx, warn)) => {
                             self.report_all(warn)?;
-                            let span = [first.to_span(), field_name.to_span()].to_span();
-                            (
-                                Some(span.of(fir::Expression::GetVariable(Resolved(
-                                    fir::VariableIdx::FormExternal(var_idx),
-                                )))),
-                                None,
-                            )
+                            let span = first.to_span().expand_to_include(field_name.to_span());
+                            let expr = fir::Expression::GetVariable(Resolved(var_idx));
+                            (Some(span.of(expr)), None)
                         }
-                        Err(_) => (
+                        None => (
                             Some(first.to_span().of(fir::Expression::FormRef(form_idx))),
                             Some(field_name),
                         ),
@@ -762,13 +757,17 @@ impl<'a, F: Frontend + 'a, R: Resources> LowerContext<'a, F, R> {
         second: fir::Spanned<String>,
     ) -> Result<Tried<fir::VariableIdx>> {
         let var_idx = match self.form(first.as_deref()) {
-            Ok((_, variables, warn)) => {
-                let idx = match Self::field_of(first.to_span().of(variables), second.as_deref()) {
-                    Ok((_, idx, warn)) => {
+            Ok((form_idx, warn)) => {
+                let idx = match self.variable(Some(form_idx), second.as_deref()) {
+                    Some((var_idx, warn)) => {
                         self.report_all(warn)?;
-                        Resolved(fir::VariableIdx::FormExternal(idx))
+                        Resolved(var_idx)
                     }
-                    Err(err) => {
+                    None => {
+                        let err = LowerDiagnostic::UnknownVariable {
+                            form: first.to_span(),
+                            variable: second.to_span(),
+                        };
                         self.report(err)?;
                         Unresolvable
                     }
@@ -800,7 +799,7 @@ impl<'a, F: Frontend + 'a, R: Resources> LowerContext<'a, F, R> {
             self.lower_external_variable_idx(first_ident, field_name)?
         } else if let Some(var_idx) = self.local_variable(first_ident.inner()) {
             Resolved(fir::VariableIdx::BodyLocal(var_idx))
-        } else if let Some((var_idx, warn)) = self.global_variable(first_ident.as_deref()) {
+        } else if let Some((var_idx, warn)) = self.variable(None, first_ident.as_deref()) {
             self.report_all(warn)?;
             Resolved(var_idx)
         } else {
@@ -925,14 +924,24 @@ impl<'a, F: Frontend + 'a, R: Resources> LowerContext<'a, F, R> {
     ) -> Result<Spanned<fir::Statement>> {
         let stmt = match stmt {
             StatementKind::If(chain) => {
-                self.ck_token_case(&chain.kw_if.span)?;
-
                 let mut containing_block = fir::Block {
                     statements: Vec::new(),
                     termination: fir::BranchTarget::Break { depth: 0 },
                 };
 
+                self.ck_token_case(&chain.kw_if.span)?;
+
+                let inner_block = self.lower_conditional(
+                    chain.kw_if.span.span(),
+                    chain.condition,
+                    chain.statements,
+                )?;
+                containing_block
+                    .statements
+                    .push(inner_block.span_map(fir::Statement::Block));
+
                 let mut next_block = *chain.next;
+
                 loop {
                     match next_block {
                         NextIf::ElseIf(ElseIf {
@@ -976,50 +985,6 @@ impl<'a, F: Frontend + 'a, R: Resources> LowerContext<'a, F, R> {
                 }
 
                 fir::Statement::Block(containing_block)
-
-                // let mut next_block = self.reserve_block();
-                // let mut branch_blocks = Vec::new();
-                // let mut iter = chain.into_iter();
-                // for (span, condition, code) in iter.by_ref() {
-                //     // let target = self.reserve_block();
-                //     // stmt_buffer.push(span.of(fir::Statement::Branch(fir::Branch {
-
-                //     // }) {
-                //     //     target: target.idx,
-                //     //     kind: fir::BranchKind::IfTrue(expr),
-                //     // }));
-                //     // branch_blocks.push((code, target));
-                // }
-
-                // let mut termination = fir::Branch::Jump(next_block.idx);
-                // if let Some(Else {
-                //     statements,
-                //     kw_else,
-                //     ..
-                // }) = iter.else_branch()
-                // {
-                //     let else_block = mem::replace(&mut next_block, self.reserve_block());
-                //     stmt_buffer.push(kw_else.span().of(fir::Statement::Branch {
-                //         target: else_block.idx,
-                //         kind: fir::BranchKind::Unconditional,
-                //     }));
-                //     self.lower_block(
-                //         statements,
-                //         fir::Branch::Jump(next_block.idx),
-                //         Some(else_block),
-                //     )?;
-                //     termination = fir::Branch::Unreachable;
-                // }
-
-                // for (code, block_idx) in branch_blocks {
-                //     self.lower_block(
-                //         code,
-                //         fir::Branch::Jump(next_block.idx),
-                //         Some(block_idx),
-                //     )?;
-                // }
-
-                // return Ok(ControlFlow::Break((termination, next_block)));
             }
             StatementKind::Set {
                 var,
@@ -1089,7 +1054,7 @@ impl<'a, F: Frontend + 'a, R: Resources> LowerContext<'a, F, R> {
         self.ck_token_case(&item.block.end.span)?;
 
         let name_span = item.name.span();
-        let item = match item.args {
+        match item.args {
             // todo: function defintiions
             args => consume_event_impl(
                 span.to_span().of(fir::EventImpl {

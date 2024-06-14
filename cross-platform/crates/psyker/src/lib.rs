@@ -44,7 +44,9 @@ mod tests {
             for them in thems {
                 match them {
                     PluginEntry::Ignored(_) => (),
-                    PluginEntry::Group { label, contents } => insert(contents.entries.iter(), all),
+                    PluginEntry::Group { label: _, contents } => {
+                        insert(contents.entries.iter(), all)
+                    }
                     PluginEntry::Record { label, contents } => {
                         all.push((*label, contents));
                     }
@@ -53,13 +55,13 @@ mod tests {
         }
         insert(m.top_level_entries.iter(), &mut everything);
 
-        for (n, e) in &everything {
-            if let Some(id) = e.fields.common.editor_id.as_deref() {
-                if id.to_lowercase().contains("boone") {
-                    println!("[{n}]: {id}");
-                }
-            }
-        }
+        // for (n, e) in &everything {
+        //     if let Some(id) = e.fields.common.editor_id.as_deref() {
+        //         if id.to_lowercase().contains("boone") {
+        //             println!("[{n}]: {id}");
+        //         }
+        //     }
+        // }
 
         // let mut tle: Vec<(&GroupLabel, usize, &PluginEntry)> = m
         //     .top_level_entries

@@ -92,7 +92,7 @@ end
                 project,
                 &mut component,
             )?;
-            drop(component);
+            component.install();
         }
 
         fn create_component(res: &mut impl ResourcesMut) {
@@ -141,7 +141,6 @@ end
             component.insert_form(fir::FormInfo {
                 name: name("Ammo556mmSurplus"),
                 kind: fir::Ident4::from_str("AMMO"),
-                script: None,
             });
             component.insert_function(fir::FunctionInfo {
                 name: name("RemoveMe"),

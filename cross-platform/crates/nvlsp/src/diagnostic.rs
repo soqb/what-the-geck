@@ -1,10 +1,10 @@
 use core::fmt;
-use std::fmt::Write;
+use std::{fmt::Write, iter};
 
 use fir::{miettify, Diagnostic, DiagnosticFilter};
 
 use lsp_types::{CodeAction, CodeActionKind, NumberOrString, Position, Range, Url, WorkspaceEdit};
-use miette::{SourceCode, SourceSpan};
+use miette::{LabeledSpan, SourceCode, SourceSpan};
 use rand::Rng;
 
 struct Source(pub String);
@@ -21,7 +21,7 @@ impl SourceCode for Source {
             .or_else(|_| {
                 Ok(Box::new(miette::MietteSpanContents::new(
                     &[],
-                    SourceSpan::new(0.into(), 0.into()),
+                    SourceSpan::new(0.into(), 0),
                     0,
                     0,
                     0,
@@ -32,11 +32,11 @@ impl SourceCode for Source {
 
 fn range_from_span(span: &SourceSpan, source: &dyn SourceCode) -> Range {
     let start = source
-        .read_span(&SourceSpan::new(span.offset().into(), 0.into()), 0, 0)
+        .read_span(&SourceSpan::new(span.offset().into(), 0), 0, 0)
         .unwrap();
     let end = source
         .read_span(
-            &SourceSpan::new((span.offset() + span.len()).into(), 0.into()),
+            &SourceSpan::new((span.offset() + span.len()).into(), 0),
             0,
             0,
         )
@@ -97,63 +97,66 @@ fn miette_to_lsp(
     }
 
     let source = miette.source_code().unwrap();
-    if let Some(labels_ref) = miette.labels() {
-        let hash = gen_hash(rng);
-        let mut labels: Vec<_> = labels_ref
-            .enumerate()
-            .filter(|(_, label)| label.inner().offset() != usize::MAX)
-            .collect();
-        labels.sort_unstable_by(|(_, a), (_, b)| a.offset().cmp(&b.offset()));
-        labels
-            .iter()
-            .enumerate()
-            .map(|(sorted_idx, &(absolute_idx, ref label))| {
-                let severity = (absolute_idx == 0)
-                    .then(|| severity_to_miette(&miette))
-                    .flatten()
-                    .unwrap_or(lsp_types::DiagnosticSeverity::HINT);
-                lsp_types::Diagnostic {
-                    range: range_from_span(label.inner(), source),
-                    severity: Some(severity),
-                    code: miette.code().map(|x| NumberOrString::String(x.to_string())),
-                    message: format!(
-                        "({hash}) {title}{rest}",
-                        title = miette,
-                        rest = label
-                            .label()
-                            .map(|text| {
-                                let head = ellipsis(sorted_idx != 0);
-                                let tail = ellipsis(sorted_idx + 1 != labels.len());
-                                format!("\n{head}{text}{tail}")
-                            })
-                            .unwrap_or_else(|| String::new())
-                    ),
-                    data: Some(index_offset.into()),
-                    related_information: (label.len() != 1).then(|| {
-                        labels
-                            .iter()
-                            .map(|(_, label)| {
-                                (
-                                    label.label().unwrap_or(""),
-                                    range_from_span(label.inner(), source),
-                                )
-                            })
-                            .map(|(label, range)| lsp_types::DiagnosticRelatedInformation {
-                                location: lsp_types::Location {
-                                    uri: uri.clone(),
-                                    range,
-                                },
-                                message: label.to_owned(),
-                            })
-                            .collect()
-                    }),
-                    ..Default::default()
-                }
-            })
-            .collect()
-    } else {
-        Vec::new()
-    }
+
+    let labels = miette.labels().unwrap_or_else(|| {
+        // in the case where the error has no labels, we make one to ensure the memo is seen somehow.
+        let one = LabeledSpan::new_primary_with_span(None, SourceSpan::new(0.into(), 1));
+        Box::new(iter::once(one))
+    });
+
+    let hash = gen_hash(rng);
+    let mut labels: Vec<_> = labels
+        .filter(|label| label.inner().offset() != usize::MAX)
+        .collect();
+    labels.sort_unstable_by(|a, b| a.offset().cmp(&b.offset()));
+    labels
+        .iter()
+        .enumerate()
+        .map(|(sorted_idx, label)| {
+            let severity = label
+                .primary()
+                .then(|| severity_to_miette(&miette))
+                .flatten()
+                .unwrap_or(lsp_types::DiagnosticSeverity::HINT);
+            lsp_types::Diagnostic {
+                range: range_from_span(label.inner(), source),
+                severity: Some(severity),
+                code: miette.code().map(|x| NumberOrString::String(x.to_string())),
+                message: format!(
+                    "({hash}) {title}{rest}",
+                    title = miette,
+                    rest = label
+                        .label()
+                        .map(|text| {
+                            let head = ellipsis(sorted_idx != 0);
+                            let tail = ellipsis(sorted_idx + 1 != labels.len());
+                            format!("\n{head}{text}{tail}")
+                        })
+                        .unwrap_or_else(|| String::new())
+                ),
+                data: Some(index_offset.into()),
+                related_information: (label.len() != 1).then(|| {
+                    labels
+                        .iter()
+                        .map(|label| {
+                            (
+                                label.label().unwrap_or(""),
+                                range_from_span(label.inner(), source),
+                            )
+                        })
+                        .map(|(label, range)| lsp_types::DiagnosticRelatedInformation {
+                            location: lsp_types::Location {
+                                uri: uri.clone(),
+                                range,
+                            },
+                            message: label.to_owned(),
+                        })
+                        .collect()
+                }),
+                ..Default::default()
+            }
+        })
+        .collect()
 }
 
 pub fn diagnostic_to_lsp<'a>(

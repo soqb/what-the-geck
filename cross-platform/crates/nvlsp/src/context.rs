@@ -1,23 +1,19 @@
-use std::{marker::PhantomData, sync::RwLock};
-
-use fir::{Diagnostic, DiagnosticFilter};
+use fir::{Diagnostic, DiagnosticFilter, ResourcesMut};
 use hashbrown::HashMap;
 
-use lsp_server::{Message, RequestId, Response};
+use lsp_server::{Message, Notification, Request, RequestId, Response};
 use lsp_types::{
     notification::{
         DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, PublishDiagnostics,
     },
     request::{CodeActionRequest, HoverRequest},
-    CodeActionOrCommand, CodeActionParams, CompletionOptions, Hover, HoverParams,
-    HoverProviderCapability, InitializeParams, InitializeResult, PublishDiagnosticsParams,
-    ServerCapabilities, Url,
+    CodeActionOrCommand, CodeActionParams, Hover, HoverParams, PublishDiagnosticsParams, Url,
 };
 use rand::SeedableRng;
 
 use crate::{
     as_notification, as_request,
-    compile::{Compiler, CompilerState, Sources},
+    compile::{AllSources, CompilationInstance, CompilerState},
     diagnostic::{diagnostic_to_lsp, diagnostic_to_lsp_code_actions},
     utils::SpanMap,
 };
@@ -36,9 +32,10 @@ pub struct Symbol {
     pub kind: SymbolKind,
 }
 
+#[derive(Default)]
 pub struct TextDocument {
     pub text: String,
-    pub syntax_tree: tree_sitter::Tree,
+    pub syntax_tree: Option<tree_sitter::Tree>,
     pub fir_script: Option<fir::Script>,
     pub diagnostics: Vec<Box<dyn Diagnostic>>,
     pub version: usize,
@@ -47,15 +44,12 @@ pub struct TextDocument {
     pub symbols: SpanMap<Symbol>,
 }
 
-pub struct Context {
+pub struct ConnectionManager {
     pub connection: lsp_server::Connection,
-    pub documents: HashMap<Url, TextDocument>,
     pub rid: i32,
-    pub compiler_state: CompilerState,
-    pub diagnostic_filter: DiagnosticFilter,
 }
 
-impl Context {
+impl ConnectionManager {
     pub fn send(&mut self, message: Message) {
         self.connection
             .sender
@@ -85,10 +79,6 @@ impl Context {
         self.send(Message::Response(Response { id, result, error }))
     }
 
-    pub fn document(&self, uri: &Url) -> &TextDocument {
-        self.documents.get(uri).unwrap_or_else(|| panic!())
-    }
-
     pub fn send_request<T: lsp_types::request::Request>(&mut self, params: T::Params) {
         let note = lsp_server::Request::new(self.rid.into(), T::METHOD.to_string(), params);
         self.rid += 1;
@@ -107,9 +97,10 @@ impl Context {
         &mut self,
         text: &String,
         uri: &Url,
-        version: usize,
+        version: &mut usize,
         index_offset: &mut usize,
         diagnostics: impl Iterator<Item = &'a dyn Diagnostic>,
+        diagnostic_filter: DiagnosticFilter,
     ) {
         // low quality seed. mid quality rng.. who care...
         let mut rng = rand::rngs::StdRng::from_seed([1; 32]);
@@ -122,70 +113,116 @@ impl Context {
                         &mut rng,
                         text,
                         &uri,
-                        self.diagnostic_filter,
+                        diagnostic_filter,
                     );
                     *index_offset += lsp_diagnostics.len();
                     lsp_diagnostics
                 })
                 .collect(),
             uri: uri.clone(),
-            version: Some(version as i32),
+            version: Some(*version as i32),
         });
+        *version += 1;
+    }
+}
+
+pub struct Context {
+    pub cm: ConnectionManager,
+    pub documents: HashMap<Url, TextDocument>,
+    pub compiler_state: CompilerState,
+    pub diagnostic_filter: DiagnosticFilter,
+}
+
+impl Context {
+    pub fn document(&self, uri: &Url) -> &TextDocument {
+        self.documents.get(uri).unwrap_or_else(|| panic!())
     }
 
     pub fn update_document(&mut self, uri: Url, text: String) {
-        let (version, mut diagnostic_version, _old_syntax_tree) = self
+        let mut document = self
             .documents
-            .get_mut(&uri)
-            .map(|doc| {
-                (
-                    doc.version + 1,
-                    doc.diagnostic_version,
-                    Some(&mut doc.syntax_tree),
-                )
-            })
-            .unwrap_or_else(|| (0, 0, None));
+            .remove(&uri)
+            .unwrap_or_else(TextDocument::default);
+        document.text = text;
+        // .or_insert_with(|| TextDocument { text, syntax_tree: , fir_script: , diagnostics: , version: , diagnostic_version: , line_lengths: , symbols:  })
+        // .map(|doc| (Some(doc), doc.version + 1, doc.diagnostic_version))
+        // .unwrap_or_else(|| (None, 0, 0));
+
+        if let Some(idx) = self.compiler_state.component_to_remove.take() {
+            self.compiler_state.resources.remove_component(idx);
+        }
 
         let mut fir_script = None;
-        let mut compiler = Compiler::new(
+        let mut compiler = CompilationInstance::new(
             &mut self.compiler_state,
-            Sources {
-                unchanged_documents: Vec::new(),
-                changed_documents: self.documents.values().collect(),
+            AllSources {
+                unchanged_documents: self
+                    .documents
+                    .iter()
+                    .filter(|(key, _)| key == &&uri)
+                    .map(|(_, value)| value)
+                    .collect(),
+                changed_documents: vec![&document],
             },
         );
-        let (syntax_tree, mut diagnostics, script_result) = compiler.compile(None, &text);
 
-        let symbols = if let Some((script, internal_variables)) = script_result {
-            let symbols = compiler.analyze(&script, &internal_variables, |d| diagnostics.push(d));
+        let component_idx = compiler.preprocess_scripts().ok();
+        // {
+        //     use std::io::Write as _;
+        //     let mut file = std::fs::OpenOptions::new()
+        //         .truncate(true)
+        //         .create(true)
+        //         .write(true)
+        //         .open("everything.txt")
+        //         .unwrap();
+        //     write!(file, "{:#?}", compiler.state.resources).unwrap();
+        // }
+
+        let _ = compiler.compile(|sc| {
+            fir_script = Some(sc?);
+            Ok(())
+        });
+
+        let symbols = if let Some(script) = fir_script {
+            let symbols = compiler.analyze(&script);
             fir_script = Some(script);
             symbols
         } else {
             SpanMap::default()
         };
 
-        self.publish_diagnostics(
-            &text,
+        let mut version = document.version;
+        let mut diagnostic_version = document.diagnostic_version;
+        let (left_ds, right_ds) = compiler.finish();
+        // strange quirk of borrowck; we need `left_ds` to be dropped before `right_ds`!
+        let left_ds = left_ds;
+
+        self.cm.publish_diagnostics(
+            &document.text,
             &uri,
-            version,
+            &mut version,
             &mut diagnostic_version,
-            diagnostics.iter().map(|d| &**d),
+            left_ds.chain(right_ds.iter().map(|d| &**d)),
+            self.diagnostic_filter,
         );
 
-        let document = TextDocument {
+        document = TextDocument {
             version,
             diagnostic_version,
-            line_lengths: text
+            line_lengths: document
+                .text
                 .lines()
                 .map(|line| line.encode_utf16().count() + 1)
                 .collect(),
-            text,
-            syntax_tree,
-            diagnostics,
+            diagnostics: right_ds,
             symbols,
             fir_script,
+            syntax_tree: None,
+            ..document
         };
         self.documents.insert(uri, document);
+
+        self.compiler_state.component_to_remove = component_idx;
     }
 
     // pub fn collect_symbols(script: &fir::Script) -> SpanMap<Symbol> {
@@ -242,7 +279,7 @@ impl Context {
             .map(CodeActionOrCommand::CodeAction)
             .collect();
 
-        self.send_response(id, Some(response));
+        self.cm.send_response(id, Some(response));
     }
 
     pub fn hover(&mut self, req: HoverParams, id: RequestId) {
@@ -251,16 +288,11 @@ impl Context {
 
         let document = self.document(&uri);
 
-        eprintln!("{:#?}", document.symbols);
         let offset = document.position_to_offset(pos);
-        eprintln!("getting symbol at {offset}");
         let symbol_got = document.symbols.get_at(offset);
-        eprintln!("{symbol_got:?}");
 
         let response = if let Some((span, symbol)) = symbol_got {
-            let contents = self
-                .compiler_state
-                .with_resources(|resources| symbol.into_hover_contents(resources));
+            let contents = symbol.into_hover_contents(&self.compiler_state.resources);
 
             Some(Hover {
                 contents,
@@ -269,7 +301,7 @@ impl Context {
         } else {
             None
         };
-        self.send_response(id, response);
+        self.cm.send_response(id, response);
     }
 
     pub fn handle_request(&mut self, req: &Request) {

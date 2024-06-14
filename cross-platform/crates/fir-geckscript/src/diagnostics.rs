@@ -4,7 +4,7 @@ use fir::{utils::TyPrinter, Span, Spanned};
 pub enum LowerWarning {
     #[error("case mismatch")]
     WrongCase {
-        #[label("this was expected to match `{expected}`")]
+        #[label(primary, "this was expected to match `{expected}`")]
         found: Span,
         expected: String,
     },
@@ -27,35 +27,44 @@ pub enum LowerDiagnostic {
     Warning(#[from] LowerWarning),
     #[error("unknown variable on form")]
     UnknownVariable {
-        #[label("this form")]
+        #[label(primary, "this form")]
         form: Span,
         #[label("has no variable with this name")]
         variable: Span,
     },
     #[error("unknown variable")]
     UnknownVariableInGeneral {
-        #[label("this was not found to be a local, form-owned or global variable")]
+        #[label(
+            primary,
+            "this was not found to be a local, form-owned or global variable"
+        )]
         variable: Span,
     },
     #[error("unknown reference")]
     Unknown1stReference {
-        #[label("this was not found to be a variable of any kind, a form, or a function")]
+        #[label(
+            primary,
+            "this was not found to be a variable of any kind, a form, or a function"
+        )]
         reference: Span,
     },
     #[error("unknown reference")]
     Unknown2ndReference {
-        #[label("this was not found to be a variable of a form, or a function")]
+        #[label(
+            primary,
+            "this was not found to be a variable of a form, or a function"
+        )]
         reference: Span,
     },
     #[error("unknown function")]
-    UnknownFunction(#[label("this function was not found")] Span),
+    UnknownFunction(#[label(primary, "this function was not found")] Span),
     #[error("unknown event")]
-    UnknownEvent(#[label("this event was not found")] Span),
+    UnknownEvent(#[label(primary, "this event was not found")] Span),
     #[error("too many reference components")]
-    TooLongReference(#[label("1 or 2 components were expected")] Span),
+    TooLongReference(#[label(primary, "1 or 2 components were expected")] Span),
     #[error("no matching operation")]
     BinaryOpTyMismatch {
-        #[label("this operand does not support")]
+        #[label(primary, "this operand does not support")]
         op_span: Span,
         #[label("this type {lhs}")]
         lhs: Spanned<TyPrinter>,
@@ -77,7 +86,7 @@ impl fir::Diagnostic for LowerDiagnostic {
 #[derive(Debug, miette::Diagnostic, thiserror::Error)]
 #[error("syntax error")]
 pub struct TreeSitterParseError {
-    #[label("syntax error here")]
+    #[label(primary, "syntax error here")]
     pub span: Span,
 }
 

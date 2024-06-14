@@ -69,3 +69,38 @@ impl_idx_extras!(TypeIdx);
 impl_idx_extras!(EventIdx);
 impl_idx_extras!(ExternalVariableIdx);
 impl_idx_extras!(FunctionIdx);
+
+impl fmt::Display for StopToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "compilation was cancelled")
+    }
+}
+
+impl std::error::Error for StopToken {}
+
+pub struct PrintSlotMap<'a, K: slotmap::Key, V>(pub &'a slotmap::SlotMap<K, V>);
+
+impl<'a, K: fmt::Debug + slotmap::Key, V: fmt::Debug> fmt::Debug for PrintSlotMap<'a, K, V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut m = f.debug_map();
+        for (k, v) in self.0 {
+            m.entry(&k, v);
+        }
+        m.finish()
+    }
+}
+
+impl fmt::Debug for TheResources {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TheResources")
+            .field("components", &PrintSlotMap(&self.components))
+            .field("functions", &PrintSlotMap(&self.functions))
+            .field("forms", &PrintSlotMap(&self.forms))
+            .field("events", &PrintSlotMap(&self.events))
+            .field(
+                "external_variables",
+                &PrintSlotMap(&self.external_variables),
+            )
+            .finish_non_exhaustive()
+    }
+}

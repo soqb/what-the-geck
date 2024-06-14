@@ -142,12 +142,13 @@ impl Context {
                             name: fir::Name {
                                 ident: edid.to_owned(),
                             },
+                            // fixme: this.. hurts.
                             kind: Ident4::from_str(label.as_str()),
-                            script: None,
                         });
 
                         use psyker::records::*;
                         let script_fields = match &contents.fields.parsed {
+                            Some(ParsedFields::Script(script)) => Some(script),
                             Some(ParsedFields::Quest(quest)) => quest
                                 .script
                                 .and_then(|ref id| index.get(id))
@@ -155,7 +156,6 @@ impl Context {
                                     ParsedFields::Script(script) => Some(script),
                                     _ => None,
                                 }),
-                            Some(ParsedFields::Script(script)) => Some(script),
                             _ => None,
                         };
                         if let Some(script) = script_fields {
@@ -169,9 +169,9 @@ impl Context {
                                         },
                                         owning_form: Some(idx),
                                         ty: match var.type_ {
-                                            scpt::Type::FloatOrRef => Ty::Float,
-                                            scpt::Type::SomeInt => Ty::Integer,
-                                            scpt::Type::Other => return None,
+                                            scpt::VarType::FloatOrRef => Ty::Float,
+                                            scpt::VarType::SomeInt => Ty::Integer,
+                                            scpt::VarType::Other => return None,
                                         },
                                     })
                                 })
@@ -1028,6 +1028,8 @@ impl<R: ResourcesMut> TargetContext<R> for Context {
             owning_form: None,
             ty: Ty::object_ref("ACHR"),
         });
+
+        component.install();
 
         Ok(())
     }

@@ -111,20 +111,20 @@ impl TypeckFailure {
 #[derive(Debug, miette::Diagnostic, thiserror::Error)]
 pub enum TypeckFailureDiagnostic {
     #[error("too few args")]
-    TooFewArgs(#[label("expected {0} more arguments")] Spanned<usize>),
+    TooFewArgs(#[label(primary, "expected {0} more arguments")] Spanned<usize>),
     #[error("unchecked transmute")]
     UncheckedConversion {
-        #[label("this is type {generic}, converted to type {specific}")]
+        #[label(primary, "this is type {generic}, converted to type {specific}")]
         generic: Spanned<TyPrinter>,
         specific: TyPrinter,
         #[label("due to {p}", p = Self::provenance_to_str(.provenance.into_inner()))]
         provenance: Spanned<ConversionReason>,
     },
     #[error("too many args")]
-    TooManyArgs(#[label("found {0} more args than expected")] Spanned<usize>),
+    TooManyArgs(#[label(primary, "found {0} more args than expected")] Spanned<usize>),
     #[error("type mismatch")]
     WrongTy {
-        #[label("this is type {found} which is not applicable to {expected}")]
+        #[label(primary, "this is type {found} which is not applicable to {expected}")]
         found: Spanned<TyPrinter>,
         expected: TyHintPrinter,
     },
@@ -201,7 +201,7 @@ pub trait LocalResources {
             VariableIdx::BodyLocal(idx) => {
                 self.get_body_variable(idx).map(|var| var.ty.into_inner())
             }
-            VariableIdx::FormInternal(idx) => self.get_internal_variable(idx).map(|var| var.ty),
+            // VariableIdx::FormInternal(idx) => self.get_internal_variable(idx).map(|var| var.ty),
             VariableIdx::FormExternal(idx) => self.get_external_variable(idx).map(|var| var.ty),
         };
         opt.map_or(Unresolvable, Resolved)
@@ -243,12 +243,12 @@ impl<C: LocalResources> TypeckEngine<C> {
                     None => return Unresolvable,
                 }
             }
-            &Expression::GetVariable(Tried::Resolved(VariableIdx::FormInternal(var_idx))) => {
-                match cx.get_internal_variable(var_idx) {
-                    Some(var) => var.ty,
-                    None => return Unresolvable,
-                }
-            }
+            // &Expression::GetVariable(Tried::Resolved(VariableIdx::FormInternal(var_idx))) => {
+            //     match cx.get_internal_variable(var_idx) {
+            //         Some(var) => var.ty,
+            //         None => return Unresolvable,
+            //     }
+            // }
             &Expression::GetVariable(Tried::Unresolvable) => {
                 return Unresolvable;
             }

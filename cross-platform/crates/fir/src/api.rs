@@ -251,7 +251,6 @@ pub struct FunctionInfo {
 pub struct FormInfo {
     pub name: Name,
     pub kind: Ident4,
-    pub script: Option<Script>,
 }
 
 #[derive(Debug)]
@@ -284,17 +283,20 @@ pub struct VariableInfo {
 /// Compliant implementations do not have to respect this signal,
 /// though they can choose to.
 ///
-/// In an effort to require that errors are properly handled,
+/// In an effort to require that errors are properly reported,
 /// stop tokens can only be manufactured through [`Frontend::forge_stop_token`].
-/// This is relatively easy to circumvent, and that choice is intentional
+/// Though this is relatively easy to circumvent, that choice is intentional
 /// as it provides an escape hatch for opting-out of this crate's opinionated design.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy)]
 pub struct StopToken {
     _marker: (),
 }
+
 pub trait Frontend {
+    /// Creates a new [`StopToken`].
     ///
+    /// See its documentation for more.
     fn forge_stop_token() -> StopToken {
         StopToken { _marker: () }
     }
@@ -350,14 +352,14 @@ pub struct ComponentEntry {
     external_variables: Vec<ExternalVariableIdx>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct TheResources {
-    components: SlotMap<ComponentIdx, ComponentEntry>,
-    functions: SlotMap<FunctionIdx, FunctionInfo>,
-    forms: SlotMap<FormIdx, FormInfo>,
-    events: SlotMap<EventIdx, EventInfo>,
-    types: SlotMap<TypeIdx, TypeInfo>,
-    external_variables: SlotMap<ExternalVariableIdx, VariableInfo>,
+    pub(crate) components: SlotMap<ComponentIdx, ComponentEntry>,
+    pub(crate) functions: SlotMap<FunctionIdx, FunctionInfo>,
+    pub(crate) forms: SlotMap<FormIdx, FormInfo>,
+    pub(crate) events: SlotMap<EventIdx, EventInfo>,
+    pub(crate) types: SlotMap<TypeIdx, TypeInfo>,
+    pub(crate) external_variables: SlotMap<ExternalVariableIdx, VariableInfo>,
 }
 
 pub trait Resources {
@@ -382,6 +384,7 @@ pub trait ResourcesMut: Resources {
         Self: 'a;
 
     fn new_component_cx(&mut self, info: ComponentInfo) -> Self::InsertCx<'_>;
+    fn remove_component(&mut self, key: ComponentIdx) -> Option<ComponentInfo>;
 
     fn function_mut(&mut self, key: FunctionIdx) -> Option<&mut FunctionInfo>;
     fn form_mut(&mut self, key: FormIdx) -> Option<&mut FormInfo>;
@@ -399,6 +402,8 @@ pub trait Insert {
     fn insert_type(&mut self, type_: TypeInfo) -> TypeIdx;
     fn insert_external_variable(&mut self, var: VariableInfo) -> ExternalVariableIdx;
 
+    fn install(self) -> ComponentIdx;
+
     fn resources_mut(&mut self) -> &mut Self::Res;
 }
 
@@ -407,9 +412,9 @@ pub struct InsertCx<'a> {
     res: &'a mut TheResources,
 }
 
-impl<'a> Drop for InsertCx<'a> {
+impl Drop for InsertCx<'_> {
     fn drop(&mut self) {
-        self.res.components.insert(mem::take(&mut self.inner));
+        self.res.remove_entries(mem::take(&mut self.inner));
     }
 }
 
@@ -444,6 +449,10 @@ impl<'a> Insert for InsertCx<'a> {
         let idx = self.res.external_variables.insert(var);
         self.inner.external_variables.push(idx);
         idx
+    }
+
+    fn install(mut self) -> ComponentIdx {
+        self.res.components.insert(mem::take(&mut self.inner))
     }
 
     fn resources_mut(&mut self) -> &mut TheResources {
@@ -497,6 +506,27 @@ impl Resources for TheResources {
     }
 }
 
+impl TheResources {
+    fn remove_entries(&mut self, entry: ComponentEntry) -> ComponentInfo {
+        fn trim<I: slotmap::Key, T>(
+            container: &mut SlotMap<I, T>,
+            list: impl IntoIterator<Item = I>,
+        ) {
+            for el in list {
+                container.remove(el);
+            }
+        }
+
+        trim(&mut self.functions, entry.functions);
+        trim(&mut self.forms, entry.forms);
+        trim(&mut self.events, entry.events);
+        trim(&mut self.types, entry.types);
+        trim(&mut self.external_variables, entry.external_variables);
+
+        entry.info
+    }
+}
+
 impl ResourcesMut for TheResources {
     type InsertCx<'a> = InsertCx<'a>;
 
@@ -508,6 +538,11 @@ impl ResourcesMut for TheResources {
             },
             res: self,
         }
+    }
+
+    fn remove_component(&mut self, key: ComponentIdx) -> Option<ComponentInfo> {
+        let entry = self.components.remove(key)?;
+        Some(self.remove_entries(entry))
     }
 
     fn function_mut(&mut self, key: FunctionIdx) -> Option<&mut FunctionInfo> {

@@ -1,6 +1,7 @@
 use fir::{DiagnosticFilter, DiagnosticKind, TargetContext};
 use hashbrown::HashMap;
 use log::info;
+use lsp_server::{Message, Notification, Request};
 use lsp_types::{
     CodeActionKind, CodeActionOptions, CodeActionProviderCapability, CompletionOptions,
     DeclarationCapability, HoverProviderCapability, OneOf, RenameOptions, ServerCapabilities,
@@ -9,7 +10,10 @@ use lsp_types::{
 };
 use serde::de::DeserializeOwned;
 
-use crate::{compile::CompilerState, context::Context};
+use crate::{
+    compile::CompilerState,
+    context::{ConnectionManager, Context},
+};
 
 macro_rules! match_type {
     ($fn:expr, { $($br:ident: $tr:ty => $rr:expr,)* $(_ => $else:expr,)? }) => {
@@ -84,9 +88,8 @@ fn main() -> anyhow::Result<()> {
     connection.initialize(serde_json::to_value(server_capabilities)?)?;
 
     let mut context = Context {
-        connection,
+        cm: ConnectionManager { connection, rid: 0 },
         documents: HashMap::default(),
-        rid: 0,
         compiler_state: CompilerState::new(source_tcx())?,
         diagnostic_filter: DiagnosticFilter {
             lets_through: DiagnosticKind::Warning(fir::Warning::BadPractice),
@@ -96,12 +99,12 @@ fn main() -> anyhow::Result<()> {
     };
 
     loop {
-        let msg = context.connection.receiver.recv()?;
+        let msg = context.cm.connection.receiver.recv()?;
         match msg {
             Message::Request(ref req) => {
                 info!("rqst: {req:?}");
 
-                if context.connection.handle_shutdown(req)? {
+                if context.cm.connection.handle_shutdown(req)? {
                     break;
                 }
 

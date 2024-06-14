@@ -236,7 +236,6 @@ impl From<&Const> for PrimitiveValue {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum VariableIdx {
     BodyLocal(BodyVariableIdx),
-    FormInternal(InternalVariableIdx),
     FormExternal(ExternalVariableIdx),
 }
 

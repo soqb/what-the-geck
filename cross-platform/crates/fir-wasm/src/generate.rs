@@ -11,7 +11,7 @@ use crate::{
         function_from_multiple_events, function_from_single_event, CodeBuilder, Import,
         ImportNamespace, ModuleBuilder, TyRepr, WasmTypeDef,
     },
-    CompileFail, NotFound, Undefined,
+    CompileFail,
 };
 
 pub fn const_expr_zero(val: ValType) -> ConstExpr {
@@ -74,18 +74,18 @@ impl<'s, 'ctx: 's, F: Frontend, R: Resources> CodeBuilder<'ctx, 's, F, R> {
                 let local_idx = self.get_local_variable(span.of(var_idx))?;
                 self.instruction(Instruction::LocalGet(local_idx));
             }
-            &Expression::GetVariable(Resolved(fir::VariableIdx::FormInternal(var_idx))) => {
-                match self.cx.global_var_indices.get(&var_idx) {
-                    Some(&(global_idx, _)) => self.instruction(Instruction::GlobalGet(global_idx)),
-                    None => {
-                        self.report_failing(Undefined {
-                            span,
-                            kind: NotFound::FormExternalVariable,
-                        })?;
-                        return Ok(());
-                    }
-                }
-            }
+            // &Expression::GetVariable(Resolved(fir::VariableIdx::FormInternal(var_idx))) => {
+            //     match self.cx.global_var_indices.get(&var_idx) {
+            //         Some(&(global_idx, _)) => self.instruction(Instruction::GlobalGet(global_idx)),
+            //         None => {
+            //             self.report_failing(Undefined {
+            //                 span,
+            //                 kind: NotFound::FormExternalVariable,
+            //             })?;
+            //             return Ok(());
+            //         }
+            //     }
+            // }
             &Expression::GetVariable(Resolved(fir::VariableIdx::FormExternal(var_idx))) => {
                 let Ok((var, TyRepr::Wasm(return_ty))) = self
                     .cx
@@ -309,17 +309,17 @@ impl<'s, 'ctx: 's, F: Frontend, R: Resources> CodeBuilder<'ctx, 's, F, R> {
                     let idx = self.get_local_variable(variable.to_span().of(var_idx))?;
                     self.instruction(Instruction::LocalSet(idx));
                 }
-                Resolved(VariableIdx::FormInternal(var_idx)) => {
-                    if let Some(&(global_idx, _)) = self.cx.global_var_indices.get(&var_idx) {
-                        self.lower_expr(value.as_ref())?;
-                        self.instruction(Instruction::GlobalSet(global_idx));
-                    } else {
-                        return Err(CompileFail::Undefined {
-                            span: variable.to_span(),
-                            kind: NotFound::LocalVariable,
-                        });
-                    }
-                }
+                // Resolved(VariableIdx::FormInternal(var_idx)) => {
+                //     if let Some(&(global_idx, _)) = self.cx.global_var_indices.get(&var_idx) {
+                //         self.lower_expr(value.as_ref())?;
+                //         self.instruction(Instruction::GlobalSet(global_idx));
+                //     } else {
+                //         return Err(CompileFail::Undefined {
+                //             span: variable.to_span(),
+                //             kind: NotFound::LocalVariable,
+                //         });
+                //     }
+                // }
                 Resolved(VariableIdx::FormExternal(var_idx)) => {
                     let Ok((var, TyRepr::Wasm(return_ty))) = self
                         .cx

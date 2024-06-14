@@ -1,17 +1,16 @@
-use std::{borrow::Cow, cell::RefCell, pin::Pin};
+use std::{borrow::Cow, mem};
 
 use fir::{
     typeck::{self, LocalResources, TyHint, TypeckEngine, TypeckResult},
     utils::ResourcesExt as _,
     Block, BranchKind, ComponentInfo, ConversionReason, Diagnostic, DiagnosticKind, EventImpl,
-    Expression, Frontend, FunctionBody, InternalVariableIdx, LowerProject, Operator, Resources,
-    ResourcesMut, Span, Spanned, Statement, StopToken, TargetContext, TheResources, ToSpan,
+    Expression, Frontend, FunctionBody, Insert, InternalVariableIdx, LowerProject, Operator,
+    Resources, ResourcesMut, Span, Spanned, Statement, StopToken, TargetContext, TheResources,
+    ToSpan,
     Tried::{self, Resolved, Unresolvable},
-    Ty, UserFunctionDefinition, VariableInfo, Warning,
+    Ty, VariableInfo, Warning,
 };
-use fir_geckscript::lower::{Geckscript, LowerResources};
-use hashbrown::{HashMap, HashSet};
-use lsp_types::Url;
+use fir_geckscript::lower::Geckscript;
 
 use crate::{
     context::{Symbol, SymbolKind, TextDocument},
@@ -20,11 +19,11 @@ use crate::{
 };
 
 #[derive(Default)]
-struct NvlspFrontend {
+struct EverythingFrontend {
     pub diagnostics: Vec<Box<dyn Diagnostic>>,
 }
 
-impl Frontend for NvlspFrontend {
+impl Frontend for EverythingFrontend {
     fn report(&mut self, diagnostic: impl Diagnostic + 'static) -> Result<(), fir::StopToken> {
         self.diagnostics
             .push(Box::new(diagnostic) as Box<dyn Diagnostic>);
@@ -32,12 +31,25 @@ impl Frontend for NvlspFrontend {
     }
 }
 
-pub struct Sources<'a> {
+#[derive(Default)]
+struct DocLocalFrontend {
+    pub diagnostics: Vec<Box<dyn Diagnostic>>,
+}
+
+impl Frontend for DocLocalFrontend {
+    fn report(&mut self, diagnostic: impl Diagnostic + 'static) -> Result<(), fir::StopToken> {
+        self.diagnostics
+            .push(Box::new(diagnostic) as Box<dyn Diagnostic>);
+        Ok(())
+    }
+}
+
+pub struct AllSources<'a> {
     pub unchanged_documents: Vec<&'a TextDocument>,
     pub changed_documents: Vec<&'a TextDocument>,
 }
 
-impl<'a> fir::Sources for Sources<'a> {
+impl<'a> fir::Sources for AllSources<'a> {
     type Input<'b> = &'b str where Self: 'b;
     fn project_name(&self) -> &str {
         "idk bro"
@@ -64,27 +76,67 @@ impl<'a> fir::Sources for Sources<'a> {
     }
 }
 
+pub struct ChangedSources<'a> {
+    inner: &'a AllSources<'a>,
+}
+
+impl<'a> fir::Sources for ChangedSources<'a> {
+    type Input<'b> = &'b str where Self: 'b;
+    fn project_name(&self) -> &str {
+        "idk bro"
+    }
+
+    fn iter_sources(&self) -> impl Iterator<Item = (fir::SourceIdx, &'_ str)> {
+        self.inner
+            .changed_documents
+            .iter()
+            .map(|doc| doc.text.as_str())
+            .enumerate()
+            .map(|(i, text)| {
+                (
+                    fir::SourceIdx((i + self.inner.unchanged_documents.len()) as u64),
+                    text,
+                )
+            })
+    }
+
+    fn get_source(&self, idx: fir::SourceIdx) -> Option<&'_ str> {
+        let idx = idx.0 as usize;
+        if let Some(idx) = idx.checked_sub(self.inner.unchanged_documents.len()) {
+            self.inner
+                .changed_documents
+                .get(idx)
+                .map(|doc| doc.text.as_str())
+        } else {
+            None
+        }
+    }
+}
+
 pub struct CompilerState {
-    resources: TheResources,
-    frontend: NvlspFrontend,
+    pub resources: TheResources,
+    pub component_to_remove: Option<fir::ComponentIdx>,
+    frontend: EverythingFrontend,
 }
 
 impl CompilerState {
     pub fn new(tcx: impl TargetContext<TheResources>) -> Result<Self, StopToken> {
         let mut resources = TheResources::default();
-        let mut frontend = NvlspFrontend::default();
+        let mut frontend = EverythingFrontend::default();
         tcx.install(&mut frontend, &mut resources)?;
         Ok(Self {
             resources,
             frontend,
+            component_to_remove: None,
         })
     }
 }
 
-pub struct Compiler<'a> {
-    state: &'a mut CompilerState,
-    sources: Sources<'a>,
+pub struct CompilationInstance<'a> {
+    pub(crate) state: &'a mut CompilerState,
+    sources: AllSources<'a>,
     instance: Geckscript,
+    frontend: DocLocalFrontend,
 }
 
 fn seek<'a>(c: &mut tree_sitter::TreeCursor<'_>, d: usize, src: &'a str) {
@@ -154,16 +206,17 @@ fn seek<'a>(c: &mut tree_sitter::TreeCursor<'_>, d: usize, src: &'a str) {
     }
 }
 
-impl<'a> Compiler<'a> {
-    pub fn new(state: &'a mut CompilerState, sources: Sources<'a>) -> Self {
-        Compiler {
+impl<'a> CompilationInstance<'a> {
+    pub fn new(state: &'a mut CompilerState, sources: AllSources<'a>) -> Self {
+        CompilationInstance {
             state,
             sources,
             instance: Default::default(),
+            frontend: DocLocalFrontend::default(),
         }
     }
 
-    pub fn preprocess_scripts(&mut self) -> Result<(), fir::StopToken> {
+    pub fn preprocess_scripts(&mut self) -> Result<fir::ComponentIdx, fir::StopToken> {
         let project = fir::Project::new(&self.sources, &mut self.state.frontend);
         let info = ComponentInfo {
             identifier: "scripts-aggregate".to_owned(),
@@ -174,7 +227,21 @@ impl<'a> Compiler<'a> {
             &mut self.instance,
             project,
             &mut component,
-        )
+        )?;
+        Ok(component.install())
+    }
+
+    pub fn compile(
+        &mut self,
+        consume: impl FnMut(Result<fir::Script, fir::StopToken>) -> Result<(), fir::StopToken>,
+    ) -> Result<(), fir::StopToken> {
+        let sources = ChangedSources {
+            inner: &self.sources,
+        };
+        let project = fir::Project::new(&sources, &mut self.frontend);
+
+        self.instance
+            .lower_scripts(project, &self.state.resources, consume)
     }
 
     // pub fn compile(
@@ -216,19 +283,30 @@ impl<'a> Compiler<'a> {
     pub fn analyze(
         &mut self,
         script: &fir::Script,
-        internal_variables: &HashMap<fir::InternalVariableIdx, fir::VariableInfo>,
-        mut report: impl FnMut(Box<dyn Diagnostic>),
+        // internal_variables: &HashMap<fir::InternalVariableIdx, fir::VariableInfo>,
     ) -> SpanMap<Symbol> {
+        let report = |d: Box<dyn Diagnostic>| self.state.frontend.diagnostics.push(d);
         let mut cker = Cker {
             script,
             resources: &self.state.resources,
-            internal_variables,
-            report: &mut report,
+            report,
             current_body: None,
             symbols: Default::default(),
         };
         cker.ck_script();
         cker.symbols
+    }
+
+    pub fn finish(
+        mut self,
+    ) -> (
+        impl Iterator<Item = &'a dyn Diagnostic> + 'a,
+        Vec<Box<dyn Diagnostic>>,
+    ) {
+        (
+            self.state.frontend.diagnostics.iter().map(|d| &**d),
+            mem::take(&mut self.frontend.diagnostics),
+        )
     }
 }
 
@@ -254,7 +332,6 @@ pub(crate) struct Cker<'a, F, R> {
     pub script: &'a fir::Script,
     pub current_body: Option<&'a fir::FunctionBody>,
     pub resources: &'a R,
-    pub internal_variables: &'a HashMap<InternalVariableIdx, VariableInfo>,
     pub symbols: SpanMap<Symbol>,
     pub report: F,
 }
@@ -507,7 +584,10 @@ impl<'a, F, R: Resources> typeck::LocalResources for Cker<'a, F, R> {
     }
 
     fn get_internal_variable(&self, idx: InternalVariableIdx) -> Option<&VariableInfo> {
-        self.internal_variables.get(&idx)
+        self.script
+            .variables
+            .get(&idx)
+            .and_then(|&idx| self.resources.get_external_variable(idx))
     }
 
     fn get_body_variable(&self, idx: fir::BodyVariableIdx) -> Option<&fir::BodyVariableInfo> {

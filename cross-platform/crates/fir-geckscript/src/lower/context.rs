@@ -1,4 +1,4 @@
-use std::borrow::Borrow;
+use core::fmt;
 use std::collections::HashMap;
 use std::convert::identity;
 
@@ -13,8 +13,7 @@ use super::{Respan, Result};
 
 use fir::{
     typeck, utils::ResourcesExt as _, Const, Diagnostic, EventIdx, ExternalVariableIdx, FormIdx,
-    Frontend, FunctionDefinition, FunctionIdx, InternalVariableIdx, Resources, Spanned, ToSpan,
-    TypeDefinition, TypeIdx,
+    Frontend, FunctionDefinition, FunctionIdx, Resources, Spanned, ToSpan, TypeDefinition, TypeIdx,
 };
 
 #[derive(Debug)]
@@ -178,7 +177,7 @@ impl<'a, F: Frontend + 'a, R: Resources> LowerContext<'a, F, R> {
     }
 
     fn get_casewise<'b, I: Copy, T: 'b, U>(
-        collection: &'b Index<'b, I, T>,
+        collection: &'b StrIndex<'b, I, T>,
         name: Spanned<&str>,
         map_data: impl FnOnce(&'b T) -> U,
         error: impl FnOnce(fir::Span) -> LowerDiagnostic,
@@ -189,7 +188,7 @@ impl<'a, F: Frontend + 'a, R: Resources> LowerContext<'a, F, R> {
             .map(|(&k, &(idx, ref t))| (idx, map_data(t), Self::cmp_case(name, k)))
     }
 
-    pub fn new(
+    pub(crate) fn new(
         resources: &'a LowerResources<'a, R>,
         frontend: &'a mut F,
         meta: &'a ScriptMetadata,
@@ -255,20 +254,14 @@ impl<'a, F: Frontend + 'a, R: Resources> LowerContext<'a, F, R> {
     pub fn form(
         &self,
         name: Spanned<&str>,
-    ) -> Result<
-        (
-            fir::FormIdx,
-            &Index<InternalVariableIdx, ExternalVariableIdx>,
-            Option<LowerDiagnostic>,
-        ),
-        LowerDiagnostic,
-    > {
+    ) -> Result<(fir::FormIdx, Option<LowerDiagnostic>), LowerDiagnostic> {
         Self::get_casewise(
             &self.resources.forms,
             name,
             identity,
             LowerDiagnostic::UnknownFunction,
         )
+        .map(|(idx, _, d)| (idx, d))
     }
 
     pub fn event(&self, name: Spanned<&str>) -> Result<EventIdx, LowerDiagnostic> {
@@ -290,25 +283,6 @@ impl<'a, F: Frontend + 'a, R: Resources> LowerContext<'a, F, R> {
             .map(|(&(_, ref k), &t)| (t, Self::cmp_case(name, k)))
     }
 
-    pub fn field_of(
-        variables: Spanned<&Index<InternalVariableIdx, ExternalVariableIdx>>,
-        field: Spanned<&str>,
-    ) -> Result<
-        (
-            fir::InternalVariableIdx,
-            fir::ExternalVariableIdx,
-            Option<LowerDiagnostic>,
-        ),
-        LowerDiagnostic,
-    > {
-        Self::get_casewise(variables.inner(), field, Clone::clone, |variable| {
-            LowerDiagnostic::UnknownVariable {
-                form: variables.to_span(),
-                variable,
-            }
-        })
-    }
-
     pub fn function(
         &self,
         name: Spanned<&str>,
@@ -325,30 +299,69 @@ impl<'a, F: Frontend + 'a, R: Resources> LowerContext<'a, F, R> {
         self.scope.resolve_variable(name)
     }
 
-    pub fn global_variable(
+    fn get_variable_internally(
         &self,
         name: Spanned<&str>,
     ) -> Option<(fir::VariableIdx, Option<LowerDiagnostic>)> {
-        if let Ok((idx, _, warn)) = Self::get_casewise(
-            &self.resources.global_variables,
-            name,
-            Clone::clone,
-            |reference| LowerDiagnostic::Unknown1stReference { reference },
-        ) {
-            return Some((fir::VariableIdx::FormExternal(idx), warn));
-        }
-
         let key = CaselessStr::new(name.into_inner());
 
         let map = &self.meta.internal_variable_name_map;
-        let Some(idx) = map.get_index_of(key) else {
+        let Some(&idx) = map.get(key) else {
             return None;
         };
-        let (key, _) = map.get_index(idx).unwrap();
+
         Some((
-            fir::VariableIdx::FormInternal(fir::InternalVariableIdx(idx as u32)),
-            Self::cmp_case(name, key.borrow()),
+            fir::VariableIdx::FormExternal(idx),
+            Self::cmp_case(name, key),
         ))
+    }
+
+    fn get_variable_externally(
+        &self,
+        owning_form: Option<FormIdx>,
+        name: Spanned<&str>,
+    ) -> Option<(fir::VariableIdx, Option<LowerDiagnostic>)> {
+        if let Ok(((_, str), &idx)) = self
+            .resources
+            .variables
+            .get_key_value(&(owning_form, CaselessStr::new(&name.into_inner())))
+            .ok_or_else(|| LowerDiagnostic::UnknownFunction(name.to_span()))
+        // .map(|(, &idx)| (idx, Self::cmp_case(name, str)))
+        {
+            let idx = fir::VariableIdx::FormExternal(idx);
+            return Some((idx, Self::cmp_case(name, str)));
+        }
+
+        None
+    }
+
+    pub fn variable(
+        &self,
+        owning_form: Option<FormIdx>,
+        name: Spanned<&str>,
+    ) -> Option<(fir::VariableIdx, Option<LowerDiagnostic>)> {
+        if owning_form.is_none() {
+            match self.get_variable_internally(name) {
+                r @ Some(_) => return r,
+                None => (),
+            }
+        }
+
+        self.get_variable_externally(owning_form, name)
+
+        // let key = CaselessStr::new(name.into_inner());
+
+        // let map = &self.meta.internal_variable_name_map;
+        // let Some(idx) = map.get_index_of(key) else {
+        //     return None;
+        // };
+        // let (key, _) = map.get_index(idx).unwrap();
+        // Some((
+        //     fir::VariableIdx::FormInternal(fir::InternalVariableIdx(idx as u32)),
+        //     Self::cmp_case(name, key.borrow()),
+        // ))
+
+        // None
     }
 
     pub fn insert_body_variables(&mut self, variables: Variables) {
@@ -386,15 +399,15 @@ impl<'a, F: Frontend + 'a, R: Resources> LowerContext<'a, F, R> {
     }
 }
 
-type Index<'a, I, T = ()> = HashMap<&'a CaselessStr, (I, T)>;
+type StrIndex<'a, I, T = ()> = HashMap<&'a CaselessStr, (I, T)>;
 
 pub struct LowerResources<'a, R> {
     raw: &'a R,
-    functions: Index<'a, FunctionIdx, &'a FunctionDefinition>,
-    forms: Index<'a, FormIdx, Index<'a, InternalVariableIdx, ExternalVariableIdx>>,
-    events: Index<'a, EventIdx>,
+    functions: StrIndex<'a, FunctionIdx, &'a FunctionDefinition>,
+    forms: StrIndex<'a, FormIdx>,
+    events: StrIndex<'a, EventIdx>,
     enums: HashMap<(TypeIdx, &'a CaselessStr), &'a Const>,
-    global_variables: Index<'a, ExternalVariableIdx>,
+    variables: HashMap<(Option<FormIdx>, &'a CaselessStr), ExternalVariableIdx>,
 }
 
 impl<'a, R: Resources> LowerResources<'a, R> {
@@ -402,7 +415,7 @@ impl<'a, R: Resources> LowerResources<'a, R> {
         index: impl Iterator<Item = (I, &'a V)>,
         mut name: impl FnMut(&'a V) -> Option<&'a str>,
         mut info_map: impl FnMut(&'a V) -> T,
-    ) -> Index<'a, I, T> {
+    ) -> StrIndex<'a, I, T> {
         index
             .filter_map(|(id, info)| {
                 name(info).map(|name| (CaselessStr::new(name), (id, info_map(info))))
@@ -425,6 +438,7 @@ impl<'a, R: Resources> LowerResources<'a, R> {
                     .map(move |(key, tag)| ((idx, CaselessStr::new(key.as_str())), tag))
             })
             .collect();
+
         Self {
             functions: Self::reformulate_index(
                 raw.iter_functions(),
@@ -437,29 +451,39 @@ impl<'a, R: Resources> LowerResources<'a, R> {
                 },
             ),
             events: Self::reformulate_index(raw.iter_events(), |i| Some(&i.name.ident), drop),
-            global_variables: Self::reformulate_index(
-                raw.iter_variables()
-                    .filter(|(_, info)| info.owning_form.is_none()),
-                |i| Some(&i.name.ident),
-                drop,
-            ),
+            // global_variables: Self::reformulate_index(
+            //     raw.iter_variables()
+            //         .filter(|(_, info)| info.owning_form.is_none()),
+            //     |i| Some(&i.name.ident),
+            //     drop,
+            // ),
             forms: Self::reformulate_index(
                 raw.iter_forms(),
                 |i| Some(&i.name.ident),
-                |form| {
-                    Self::reformulate_index(
-                        form.script
-                            .iter()
-                            .flat_map(|script| &script.variables)
-                            .map(|(&int, ext)| (int, ext)),
-                        |&var| {
-                            raw.get_external_variable(var)
-                                .map(|var| var.name.ident.as_str())
-                        },
-                        Clone::clone,
-                    )
-                },
+                drop,
+                // |form| {
+                //     Self::reformulate_index(
+                //         form.script
+                //             .iter()
+                //             .flat_map(|script| &script.variables)
+                //             .map(|(&int, ext)| (int, ext)),
+                //         |&var| {
+                //             raw.get_external_variable(var)
+                //                 .map(|var| var.name.ident.as_str())
+                //         },
+                //         Clone::clone,
+                //     )
+                // },
             ),
+            variables: raw
+                .iter_variables()
+                .map(|(id, info)| {
+                    (
+                        (info.owning_form.clone(), CaselessStr::new(&info.name.ident)),
+                        id,
+                    )
+                })
+                .collect(),
             raw,
             enums,
         }
