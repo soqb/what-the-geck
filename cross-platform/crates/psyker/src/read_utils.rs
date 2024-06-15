@@ -31,7 +31,6 @@ impl<T: BinRead> BinRead for OrEof<T> {
     ) -> BinResult<Self> {
         let start_pos = reader.stream_position()?;
         let end_pos = reader.seek(SeekFrom::End(0))?;
-        eprintln!("remaining bytes: {}", end_pos - start_pos);
         if start_pos == end_pos {
             return Ok(Self::Eof);
         }

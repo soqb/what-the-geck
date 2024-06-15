@@ -150,6 +150,8 @@ end
                     return_ty: fir::Ty::Float,
                 }),
             });
+
+            component.install();
         }
 
         create_component(&mut resources);
@@ -178,7 +180,12 @@ end
         let module = builder.into_module().unwrap();
 
         let bytes = module.finish();
-        let mut outstream = io::stdout();
+        let mut outstream = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open("out.wasm")
+            .unwrap();
         io::copy(&mut &bytes[..], &mut outstream).unwrap();
 
         Ok(())

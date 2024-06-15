@@ -1,0 +1,9 @@
+[package]
+name = "fir-wasm-runtime"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wasmtime = "21.0.1"
+fir = { path = "../fir" }
+anyhow = "1.0.86"

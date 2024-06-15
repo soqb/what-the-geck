@@ -9,6 +9,8 @@ members = [
     "crates/psyker",
     "crates/nvlsp",
     "crates/nv-types",
+    "crates/scribe",
+    "crates/fir-wasm-runtime",
     "xtask",
 ]
 exclude = [

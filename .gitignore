@@ -3,3 +3,4 @@
 **/.helix
 **/.cache
 **/node_modules
+**/*.wasm

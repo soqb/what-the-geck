@@ -137,6 +137,8 @@ end
                 return_ty: fir::Ty::Float,
             }),
         });
+
+        component.install();
     }
 
     create_component(&mut resources);

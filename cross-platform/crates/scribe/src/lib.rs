@@ -13,12 +13,6 @@ pub struct NameHash {
     pub high: u32,
 }
 
-#[derive(Debug)]
-pub struct Meta {
-    pub folder_count: usize,
-    pub file_count: usize,
-}
-
 bitflags! {
     #[derive(Debug, Clone, Copy)]
     struct ArchiveFlags: u64 {
@@ -36,22 +30,21 @@ pub enum Entry<A: Archive + ?Sized> {
 }
 
 pub trait Archive {
-    type RootPtr: Clone;
     type FolderPtr: Clone;
     type FilePtr: Clone;
 
     type Err;
 
-    fn root(&mut self) -> Result<Self::RootPtr, Self::Err>;
+    // fn root(&mut self) -> Result<Self::RootPtr, Self::Err>;
     fn root_folder(&mut self) -> Result<Self::FolderPtr, Self::Err>;
 
     fn next_entry(&mut self, ptr: &mut Self::FolderPtr) -> Result<Option<Entry<Self>>, Self::Err>;
 
-    fn next_folder(
-        &mut self,
-        ptr: &mut Self::RootPtr,
-    ) -> Result<Option<Self::FolderPtr>, Self::Err>;
-    fn next_file(&mut self, ptr: &mut Self::FolderPtr) -> Result<Option<Self::FilePtr>, Self::Err>;
+    // fn next_folder(
+    //     &mut self,
+    //     ptr: &mut Self::RootPtr,
+    // ) -> Result<Option<Self::FolderPtr>, Self::Err>;
+    // fn next_file(&mut self, ptr: &mut Self::FolderPtr) -> Result<Option<Self::FilePtr>, Self::Err>;
     fn read_file_contents<'a>(
         &'a mut self,
         ptr: &Self::FilePtr,
@@ -59,9 +52,9 @@ pub trait Archive {
 
     fn folder_path<'a>(
         &'a mut self,
-        folder: &Self::FolderPtr,
+        folder: &'a Self::FolderPtr,
     ) -> Result<Option<&'a str>, Self::Err>;
-    fn file_name<'a>(&'a mut self, file: &Self::FilePtr) -> Result<Option<&'a str>, Self::Err>;
+    fn file_name<'a>(&'a mut self, file: &'a Self::FilePtr) -> Result<Option<&'a str>, Self::Err>;
 
     fn should_compress(&self, file: &Self::FilePtr) -> Result<Option<bool>, Self::Err>;
 }
@@ -121,24 +114,7 @@ mod tests {
     use binrw::BinResult;
 
     use crate::*;
-
-    use self::v104::Wcfg;
-
-    fn util_print_archive<A: Archive>(cx: &mut A) -> Result<(), A::Err> {
-        let mut root = cx.root()?;
-
-        while let Some(mut folder) = cx.next_folder(&mut root)? {
-            let folder_name = cx.folder_path(&folder)?.unwrap();
-            println!("{folder_name}");
-
-            while let Some(file) = cx.next_file(&mut folder)? {
-                let file_name = cx.file_name(&file)?.unwrap();
-                println!(" >> {file_name}");
-            }
-        }
-
-        Ok(())
-    }
+    use crate::{common::util_print_archive, v104::Wcfg};
 
     // #[test]
     fn read_file_records() -> BinResult<()> {
@@ -162,7 +138,7 @@ mod tests {
 
             let mut cursor: io::Cursor<Vec<u8>> = Default::default();
 
-            v104::write2(&mut arch, &mut cursor, Wcfg::default())?;
+            v104::write(&mut arch, &mut cursor, Wcfg::default())?;
 
             cursor.into_inner()
         };

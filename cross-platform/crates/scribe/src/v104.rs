@@ -110,7 +110,7 @@ mod read {
     #[derive(Debug, Clone)]
     pub struct RootPtr {
         cumulative_files_before: usize,
-        offset_of_next_folder: u32,
+        base_offset: u32,
         folder_index: usize,
     }
 
@@ -118,7 +118,8 @@ mod read {
     pub struct InFolderPtr {
         cumulative_files_before: usize,
         file_count: u32,
-        offset_of_next_file: u64,
+        base_offset: u64,
+        name_len: u8,
         folder_index: usize,
         file_index: usize,
     }
@@ -135,6 +136,13 @@ mod read {
         size: u32,
         offset_of_file_data: u32,
         compressed: bool,
+    }
+
+    #[derive(Debug)]
+    pub struct Meta {
+        pub folder_count: usize,
+        pub file_count: usize,
+        pub header: super::Header,
     }
 
     impl<R: Read + Seek> Rcx<R> {
@@ -188,102 +196,36 @@ mod read {
 
             Ok(self.file_names.last().map(|s| s.as_str()))
         }
-    }
-
-    pub fn read<R: Read + Seek>(mut read: R) -> BinResult<(Rcx<R>, crate::Meta)> {
-        read.rewind()?;
-        let header = HeaderRecord::read_le(&mut read)?;
-
-        let intersection = header
-            .archive_flags
-            .intersection(ArchiveFlags::UNSUPPORTED_UNION);
-
-        if !intersection.is_empty() {
-            return Err(binrw::Error::AssertFail {
-                pos: 8,
-                message: format!("archive flags {intersection:?} are not supported",),
-            });
-        }
-
-        let meta = crate::Meta {
-            file_count: header.file_count as usize,
-            folder_count: header.folder_count as usize,
-        };
-
-        let cx = Rcx {
-            read,
-            header,
-            folder_paths: Vec::new(),
-            file_names: Vec::new(),
-            last_file_name_offset: 0,
-        };
-
-        Ok((cx, meta))
-    }
-
-    impl<R: Read + Seek> Archive for Rcx<R> {
-        type RootPtr = RootPtr;
-        type FolderPtr = FolderPtr;
-        type FilePtr = FilePtr;
-
-        type Err = binrw::Error;
-
-        fn root(&mut self) -> BinResult<RootPtr> {
-            let ptr = RootPtr {
-                cumulative_files_before: 0,
-                offset_of_next_folder: self.header.folder_offset,
-                folder_index: 0,
-            };
-            Ok(ptr)
-        }
-
-        fn root_folder(&mut self) -> BinResult<FolderPtr> {
-            self.root().map(FolderPtr::Root)
-        }
-
-        fn next_entry(&mut self, ptr: &mut FolderPtr) -> BinResult<Option<Entry<Self>>> {
-            match ptr {
-                FolderPtr::Root(root) => self.next_folder(root).map(|slot| slot.map(Entry::Folder)),
-                FolderPtr::Folder(_) => self.next_file(ptr).map(|slot| slot.map(Entry::File)),
-            }
-        }
 
         fn next_folder(&mut self, ptr: &mut RootPtr) -> BinResult<Option<FolderPtr>> {
             if ptr.folder_index >= self.header.folder_count as usize {
                 return Ok(None);
             }
 
-            self.goto(ptr.offset_of_next_folder as u64)?;
+            self.goto(ptr.base_offset as u64 + (ptr.folder_index * 16) as u64)?;
             let folder: FolderRecord = self.read()?;
 
-            let mut offset = (folder.offset - self.header.total_file_name_length) as u64 + 1;
+            let mut offset = (folder.offset - self.header.total_file_name_length) as u64;
 
-            if self.has_folder_names() && ptr.folder_index >= self.folder_paths.len() {
+            let name_len = if self.has_folder_names() {
                 self.read.seek(Start(offset))?;
-                let name: NullString = self.read()?;
+                let len: u8 = self.read()?;
+                offset += len as u64 + 1;
 
-                let name_len = name.len() as u64 + 1;
-                let name = name.try_into().or_else(|err| {
-                    Err(binrw::Error::Custom {
-                        pos: self.read.stream_position()? - name_len,
-                        err: Box::new(err),
-                    })
-                })?;
-
-                offset = self.read.stream_position()?;
-
-                self.folder_paths.insert(ptr.folder_index, name);
+                len + 1
+            } else {
+                0
             };
 
             let folder = InFolderPtr {
                 file_count: folder.file_count,
-                offset_of_next_file: offset,
+                base_offset: offset,
                 file_index: 0,
+                name_len,
                 cumulative_files_before: ptr.cumulative_files_before,
                 folder_index: ptr.folder_index,
             };
 
-            ptr.offset_of_next_folder += 16;
             ptr.folder_index += 1;
             ptr.cumulative_files_before += folder.file_count as usize;
 
@@ -299,7 +241,7 @@ mod read {
                 return Ok(None);
             }
 
-            self.goto(ptr.offset_of_next_file as u64)?;
+            self.goto(ptr.base_offset as u64 + (ptr.file_index * 16) as u64)?;
 
             let FileRecord { size, offset, .. } = self.read()?;
             let flags = size >> 30;
@@ -312,11 +254,69 @@ mod read {
                 cumulative_files_before: ptr.cumulative_files_before,
             };
 
-            ptr.offset_of_next_file += 16;
             ptr.file_index += 1;
             ptr.cumulative_files_before += 1;
 
             Ok(Some(file))
+        }
+
+        fn root(&mut self) -> BinResult<RootPtr> {
+            let ptr = RootPtr {
+                cumulative_files_before: 0,
+                base_offset: self.header.folder_offset,
+                folder_index: 0,
+            };
+            Ok(ptr)
+        }
+    }
+
+    pub fn read<R: Read + Seek>(mut read: R) -> BinResult<(Rcx<R>, Meta)> {
+        read.rewind()?;
+        let header = HeaderRecord::read_le(&mut read)?;
+
+        let intersection = header
+            .archive_flags
+            .intersection(ArchiveFlags::UNSUPPORTED_UNION);
+
+        if !intersection.is_empty() {
+            return Err(binrw::Error::AssertFail {
+                pos: 8,
+                message: format!("archive flags {intersection:?} are not supported",),
+            });
+        }
+
+        let meta = Meta {
+            file_count: header.file_count as usize,
+            folder_count: header.folder_count as usize,
+            header: header.clone(),
+        };
+
+        let cx = Rcx {
+            read,
+            header,
+            folder_paths: Vec::new(),
+            file_names: Vec::new(),
+            last_file_name_offset: 0,
+        };
+
+        Ok((cx, meta))
+    }
+
+    impl<R: Read + Seek> Archive for Rcx<R> {
+        type FolderPtr = FolderPtr;
+        type FilePtr = FilePtr;
+
+        type Err = binrw::Error;
+
+        fn root_folder(&mut self) -> BinResult<FolderPtr> {
+            self.root().map(FolderPtr::Root)
+        }
+
+        fn next_entry(&mut self, ptr: &mut FolderPtr) -> BinResult<Option<Entry<Self>>> {
+            match ptr {
+                FolderPtr::Root(root) => self.next_folder(root).map(|slot| slot.map(Entry::Folder)),
+                FolderPtr::Folder(_) => self.next_file(ptr).map(|slot| slot.map(Entry::File)),
+            }
         }
 
         fn read_file_contents<'a>(&'a mut self, ptr: &Self::FilePtr) -> BinResult<impl Read + 'a> {
@@ -366,15 +366,29 @@ mod read {
             Ok(tabloid)
         }
 
-        fn folder_path<'a>(&'a mut self, folder: &FolderPtr) -> BinResult<Option<&'a str>> {
-            let s = match folder {
-                FolderPtr::Root(_) => Some(""),
-                FolderPtr::Folder(folder) => self
-                    .folder_paths
-                    .get(folder.folder_index)
-                    .map(|s| s.as_str()),
+        fn folder_path<'a>(&'a mut self, ptr: &FolderPtr) -> BinResult<Option<&'a str>> {
+            let FolderPtr::Folder(ptr) = ptr else {
+                return Ok(Some(""));
             };
 
+            if self.has_folder_names() {
+                let offset = ptr.base_offset - ptr.name_len as u64 + 1;
+                self.read.seek(Start(offset))?;
+
+                let name: NullString = self.read()?;
+
+                let name_len = name.len() as u64 + 1;
+                let name = name.try_into().or_else(|err| {
+                    Err(binrw::Error::Custom {
+                        pos: self.read.stream_position()? - name_len,
+                        err: Box::new(err),
+                    })
+                })?;
+
+                self.folder_paths.insert(ptr.folder_index, name);
+            };
+
+            let s = self.folder_paths.get(ptr.folder_index).map(String::as_str);
             Ok(s)
         }
 
@@ -432,28 +446,30 @@ mod write {
 
     impl<W: Write + Seek> Wcx<W> {
         fn write<T: for<'a> BinWrite<Args<'a> = ()>>(&mut self, v: T) -> BinResult<()> {
-            v.write_options(&mut self.write, self.cfg.endian, ())
+            let endian = if self.cfg.big_endian {
+                Endian::Big
+            } else {
+                Endian::Little
+            };
+
+            v.write_options(&mut self.write, endian, ())
         }
     }
 
     pub struct Wcfg {
-        pub endian: Endian,
+        pub big_endian: bool,
         pub flags: ArchiveFlags,
     }
 
     impl Default for Wcfg {
         fn default() -> Wcfg {
             Wcfg {
-                endian: Endian::Little,
+                big_endian: false,
                 flags: ArchiveFlags::DIR_NAMES | ArchiveFlags::FILE_NAMES,
             }
         }
     }
-    pub fn write2<A: Archive, W: Write + Seek>(
-        archive: &mut A,
-        write: W,
-        cfg: Wcfg,
-    ) -> BinResult<()>
+    pub fn write<A: Archive, W: Write + Seek>(archive: &mut A, write: W, cfg: Wcfg) -> BinResult<()>
     where
         // fixme: change api to avoid this ridiculousness.
         binrw::Error: From<A::Err>,
@@ -494,10 +510,11 @@ mod write {
             let mut folder_stack = Vec::new();
             let mut file_buf = Vec::new();
 
-            for i in 0.. {
+            loop {
                 while let Some(entry) = archive.next_entry(&mut this_ptr)? {
                     match entry {
                         Entry::Folder(dir) => {
+                            let mut total_path = things.total_path.clone();
                             folder_stack.push((
                                 this_ptr,
                                 mem::take(&mut things),
@@ -507,13 +524,14 @@ mod write {
                             let path = archive.folder_path(&dir)?.unwrap();
                             things.info.hash = hash(path);
                             if cx.cfg.flags.contains(ArchiveFlags::DIR_NAMES) {
-                                if !things.total_path.is_empty() {
-                                    things.total_path.reserve(path.len() + 1);
-                                    things.total_path.push('\\');
+                                if !total_path.is_empty() {
+                                    total_path.reserve(path.len() + 1);
+                                    total_path.push('\\');
                                 }
-                                things.total_path.push_str(path);
+                                total_path.push_str(path);
                             }
 
+                            things.total_path = total_path;
                             this_ptr = dir;
                         }
                         Entry::File(file) => {
@@ -549,7 +567,6 @@ mod write {
         let mut total_file_records_offset = 16 * folders.len();
         let mut total_folder_name_length = 0;
 
-        let mut file_idx = 0;
         for (_, things) in &mut folders {
             things.info.offset += total_file_records_offset as u32;
 
@@ -576,8 +593,6 @@ mod write {
                 cx.write.write_all(&[0; 16])?;
                 total_file_records_offset += 16;
             }
-
-            file_idx += things.info.file_count as usize;
         }
         let mut total_file_name_length = 0;
 
@@ -599,16 +614,20 @@ mod write {
         let mut total_file_data_size: usize = 0;
 
         let embed_file_names = cx.cfg.flags.contains(ArchiveFlags::EMBED_FILE_NAMES);
+        eprintln!("should embed: {embed_file_names}");
 
         let mut file_iter = files.iter_mut().map(|(f, i)| (&*f, i));
-        for (folder, things) in &folders {
+        for (_, things) in &folders {
             let folder_path = if embed_file_names {
-                archive.folder_path(folder)?.unwrap().to_owned()
+                // FIXME: needs to nest with parent folders!!
+                things.total_path.as_str()
             } else {
-                String::new()
+                ""
             };
             for (file, info) in file_iter.by_ref().take(things.info.file_count as usize) {
-                info.offset += (total_file_records_offset + total_file_data_size) as u32;
+                info.offset += (total_file_records_offset
+                    + total_file_name_length
+                    + total_file_data_size) as u32;
 
                 if embed_file_names {
                     let file_name = archive.file_name(file)?.unwrap();
@@ -634,6 +653,7 @@ mod write {
                 let mut data = archive.read_file_contents(file)?;
 
                 let size = if compress_data {
+                    eprintln!("ohn o! compressing");
                     // we allocate for the "original size" of the data.
                     cx.write.write_all(&[0; 4])?;
 
@@ -681,235 +701,235 @@ mod write {
             cx.write(&things.info)?;
         }
 
-        let mut file_idx = 0;
+        let mut file_iter = files.iter_mut().map(|(f, i)| (&*f, i));
         for (_, things) in &folders {
             cx.write.seek(Current(things.total_path.len() as i64 + 2))?;
 
-            for (_, info) in &files[file_idx..][0..things.info.file_count as usize] {
-                cx.write(info)?;
+            for (ptr, info) in file_iter.by_ref().take(things.info.file_count as usize) {
+                let name = archive.file_name(ptr)?;
+                eprintln!("{name:?} -> {info:?}");
+                cx.write(&*info)?;
             }
-
-            file_idx += things.info.file_count as usize;
         }
 
         Ok(())
     }
 
-    pub fn write<A: Archive, W: Write + Seek>(archive: &mut A, write: W, cfg: Wcfg) -> BinResult<()>
-    where
-        // fixme: change api to avoid this ridiculousness.
-        binrw::Error: From<A::Err>,
-    {
-        let mut cx = Wcx { write, cfg };
+    // pub fn write<A: Archive, W: Write + Seek>(archive: &mut A, write: W, cfg: Wcfg) -> BinResult<()>
+    // where
+    //     // fixme: change api to avoid this ridiculousness.
+    //     binrw::Error: From<A::Err>,
+    // {
+    //     let mut cx = Wcx { write, cfg };
 
-        // we don't have enough information to write out the header yet,
-        // so we write zeros and come back later.
-        cx.write.write_all(&[0; 36])?;
+    //     // we don't have enough information to write out the header yet,
+    //     // so we write zeros and come back later.
+    //     cx.write.write_all(&[0; 36])?;
 
-        // first pass --- we collect the folders since we need their count:
-        let mut root = archive.root()?;
-        let mut folders = Vec::new();
-        let mut files = Vec::new();
-        while let Some(folder) = archive.next_folder(&mut root)? {
-            folders.push((
-                folder,
-                FolderRecord {
-                    hash: 0,
-                    file_count: 0,
-                    offset: 36,
-                },
-                0,
-            ));
+    //     // first pass --- we collect the folders since we need their count:
+    //     let mut root = archive.root()?;
+    //     let mut folders = Vec::new();
+    //     let mut files = Vec::new();
+    //     while let Some(folder) = archive.next_folder(&mut root)? {
+    //         folders.push((
+    //             folder,
+    //             FolderRecord {
+    //                 hash: 0,
+    //                 file_count: 0,
+    //                 offset: 36,
+    //             },
+    //             0,
+    //         ));
 
-            // like above, we don't bother with offsets/sizes/hash yet.
-            cx.write.write_all(&[0; 16])?;
-        }
+    //         // like above, we don't bother with offsets/sizes/hash yet.
+    //         cx.write.write_all(&[0; 16])?;
+    //     }
 
-        // second pass --- we write folder names & allocate file space (file record blocks):
-        #[derive(Clone, Copy)]
-        enum PathPresence {
-            Unknown,
-            AllPresent,
-            AllAbsent,
-        }
+    //     // second pass --- we write folder names & allocate file space (file record blocks):
+    //     #[derive(Clone, Copy)]
+    //     enum PathPresence {
+    //         Unknown,
+    //         AllPresent,
+    //         AllAbsent,
+    //     }
 
-        let mut total_file_records_offset = 16 * folders.len();
-        let mut total_folder_name_length = 0;
+    //     let mut total_file_records_offset = 16 * folders.len();
+    //     let mut total_folder_name_length = 0;
 
-        let mut folder_paths = PathPresence::Unknown;
-        for (mut folder, info, name_len) in folders.iter_mut().map(|(f, i, n)| (f.clone(), i, n)) {
-            info.offset += total_file_records_offset as u32;
+    //     let mut folder_paths = PathPresence::Unknown;
+    //     for (mut folder, info, name_len) in folders.iter_mut().map(|(f, i, n)| (f.clone(), i, n)) {
+    //         info.offset += total_file_records_offset as u32;
 
-            match (archive.folder_path(&folder)?, folder_paths) {
-                (None, PathPresence::AllPresent) | (Some(_), PathPresence::AllAbsent) => {
-                    return Err(binrw::Error::AssertFail {
-                        pos: 0,
-                        message: "either exactly all or exactly no folders should have paths"
-                            .to_owned(),
-                    })
-                }
-                (None, PathPresence::AllAbsent) => (),
-                (None, PathPresence::Unknown) => folder_paths = PathPresence::AllAbsent,
-                (Some(path), PathPresence::AllPresent | PathPresence::Unknown) => {
-                    let str_len: u8 =
-                        path.len()
-                            .try_into()
-                            .map_err(|_| binrw::Error::AssertFail {
-                                pos: 0,
-                                message: format!(
-                                    "folder path {path} must be less than 255 bytes in length."
-                                ),
-                            })?;
-                    folder_paths = PathPresence::AllPresent;
+    //         match (archive.folder_path(&folder)?, folder_paths) {
+    //             (None, PathPresence::AllPresent) | (Some(_), PathPresence::AllAbsent) => {
+    //                 return Err(binrw::Error::AssertFail {
+    //                     pos: 0,
+    //                     message: "either exactly all or exactly no folders should have paths"
+    //                         .to_owned(),
+    //                 })
+    //             }
+    //             (None, PathPresence::AllAbsent) => (),
+    //             (None, PathPresence::Unknown) => folder_paths = PathPresence::AllAbsent,
+    //             (Some(path), PathPresence::AllPresent | PathPresence::Unknown) => {
+    //                 let str_len: u8 =
+    //                     path.len()
+    //                         .try_into()
+    //                         .map_err(|_| binrw::Error::AssertFail {
+    //                             pos: 0,
+    //                             message: format!(
+    //                                 "folder path {path} must be less than 255 bytes in length."
+    //                             ),
+    //                         })?;
+    //                 folder_paths = PathPresence::AllPresent;
 
-                    *name_len = str_len as usize + 2;
-                    total_file_records_offset += *name_len;
-                    total_folder_name_length += str_len as usize + 1;
-                    info.hash = hash(&path);
+    //                 *name_len = str_len as usize + 2;
+    //                 total_file_records_offset += *name_len;
+    //                 total_folder_name_length += str_len as usize + 1;
+    //                 info.hash = hash(&path);
 
-                    cx.write.write_all(&[str_len + 1])?;
-                    cx.write.write_all(path.as_bytes())?;
-                    cx.write.write_all(&[0])?;
-                }
-            }
+    //                 cx.write.write_all(&[str_len + 1])?;
+    //                 cx.write.write_all(path.as_bytes())?;
+    //                 cx.write.write_all(&[0])?;
+    //             }
+    //         }
 
-            while let Some(file) = archive.next_file(&mut folder)? {
-                cx.write.write_all(&[0; 16])?;
-                files.push((
-                    file,
-                    FileRecord {
-                        hash: 0,
-                        size: 0,
-                        offset: 36,
-                    },
-                ));
+    //         while let Some(file) = archive.next_file(&mut folder)? {
+    //             cx.write.write_all(&[0; 16])?;
+    //             files.push((
+    //                 file,
+    //                 FileRecord {
+    //                     hash: 0,
+    //                     size: 0,
+    //                     offset: 36,
+    //                 },
+    //             ));
 
-                info.file_count += 1;
-                total_file_records_offset += 16;
-            }
-        }
+    //             info.file_count += 1;
+    //             total_file_records_offset += 16;
+    //         }
+    //     }
 
-        let mut total_file_name_length = 0;
+    //     let mut total_file_name_length = 0;
 
-        // third pass --- file names:
-        if cx.cfg.flags.contains(ArchiveFlags::FILE_NAMES) {
-            for (file, info) in files.iter_mut().map(|(f, i)| (&*f, i)) {
-                // fixme!
-                let name = archive.file_name(file)?.unwrap();
-                cx.write.write_all(name.as_bytes())?;
-                cx.write.write_all(&[0])?;
+    //     // third pass --- file names:
+    //     if cx.cfg.flags.contains(ArchiveFlags::FILE_NAMES) {
+    //         for (file, info) in files.iter_mut().map(|(f, i)| (&*f, i)) {
+    //             // fixme!
+    //             let name = archive.file_name(file)?.unwrap();
+    //             cx.write.write_all(name.as_bytes())?;
+    //             cx.write.write_all(&[0])?;
 
-                info.hash = hash(name);
+    //             info.hash = hash(name);
 
-                total_file_name_length += name.len() + 1;
-            }
-        }
+    //             total_file_name_length += name.len() + 1;
+    //         }
+    //     }
 
-        // fourth pass --- file contents:
-        let mut total_file_data_size: usize = 0;
+    //     // fourth pass --- file contents:
+    //     let mut total_file_data_size: usize = 0;
 
-        let mut file_iter = files.iter_mut().map(|(f, i)| (&*f, i));
+    //     let mut file_iter = files.iter_mut().map(|(f, i)| (&*f, i));
 
-        let embed_file_names = cx.cfg.flags.contains(ArchiveFlags::EMBED_FILE_NAMES);
+    //     let embed_file_names = cx.cfg.flags.contains(ArchiveFlags::EMBED_FILE_NAMES);
 
-        for (folder, dir_info, _) in &folders {
-            let folder_path = if embed_file_names {
-                archive.folder_path(folder)?.unwrap().to_owned()
-            } else {
-                String::new()
-            };
-            for _ in 0..dir_info.file_count {
-                let Some((file, info)) = file_iter.next() else {
-                    break;
-                };
+    //     for (folder, dir_info, _) in &folders {
+    //         let folder_path = if embed_file_names {
+    //             archive.folder_path(folder)?.unwrap().to_owned()
+    //         } else {
+    //             String::new()
+    //         };
+    //         for _ in 0..dir_info.file_count {
+    //             let Some((file, info)) = file_iter.next() else {
+    //                 break;
+    //             };
 
-                info.offset += (total_file_records_offset + total_file_data_size) as u32;
+    //             info.offset += (total_file_records_offset + total_file_data_size) as u32;
 
-                if embed_file_names {
-                    let file_name = archive.file_name(file)?.unwrap();
-                    let byte_len = (folder_path.len() + 1 + file_name.len()) as u8;
+    //             if embed_file_names {
+    //                 let file_name = archive.file_name(file)?.unwrap();
+    //                 let byte_len = (folder_path.len() + 1 + file_name.len()) as u8;
 
-                    cx.write.write_all(&[byte_len])?;
-                    cx.write.write_all(folder_path.as_bytes())?;
-                    cx.write.write_all(b"\\")?;
-                    cx.write.write_all(file_name.as_bytes())?;
-                }
+    //                 cx.write.write_all(&[byte_len])?;
+    //                 cx.write.write_all(folder_path.as_bytes())?;
+    //                 cx.write.write_all(b"\\")?;
+    //                 cx.write.write_all(file_name.as_bytes())?;
+    //             }
 
-                let invert_compression = cx.cfg.flags.contains(ArchiveFlags::INVERT_COMPRESSION);
-                let compress_data = match (archive.should_compress(file)?, invert_compression) {
-                    (None, compress) => compress,
-                    (Some(compress), _) => compress,
-                };
+    //             let invert_compression = cx.cfg.flags.contains(ArchiveFlags::INVERT_COMPRESSION);
+    //             let compress_data = match (archive.should_compress(file)?, invert_compression) {
+    //                 (None, compress) => compress,
+    //                 (Some(compress), _) => compress,
+    //             };
 
-                let compression_bit = {
-                    let the_bit = (compress_data ^ invert_compression) as u32;
-                    the_bit << 29
-                };
+    //             let compression_bit = {
+    //                 let the_bit = (compress_data ^ invert_compression) as u32;
+    //                 the_bit << 29
+    //             };
 
-                let mut data = archive.read_file_contents(file)?;
+    //             let mut data = archive.read_file_contents(file)?;
 
-                let size = if compress_data {
-                    // we allocate for the "original size" of the data.
-                    cx.write.write_all(&[0; 4])?;
+    //             let size = if compress_data {
+    //                 // we allocate for the "original size" of the data.
+    //                 cx.write.write_all(&[0; 4])?;
 
-                    let start_pos = cx.write.stream_position()?;
+    //                 let start_pos = cx.write.stream_position()?;
 
-                    let mut encoder = ZlibEncoder::new(cx.write, Compression::new(4));
-                    let original_size = io::copy(&mut data, &mut encoder)?;
-                    cx.write = encoder.finish()?;
+    //                 let mut encoder = ZlibEncoder::new(cx.write, Compression::new(4));
+    //                 let original_size = io::copy(&mut data, &mut encoder)?;
+    //                 cx.write = encoder.finish()?;
 
-                    let end_pos = cx.write.stream_position()?;
+    //                 let end_pos = cx.write.stream_position()?;
 
-                    cx.write.seek(Start(start_pos - 4))?;
-                    cx.write(original_size)?;
+    //                 cx.write.seek(Start(start_pos - 4))?;
+    //                 cx.write(original_size)?;
 
-                    end_pos - start_pos
-                } else {
-                    io::copy(&mut data, &mut cx.write)?
-                };
+    //                 end_pos - start_pos
+    //             } else {
+    //                 io::copy(&mut data, &mut cx.write)?
+    //             };
 
-                total_file_data_size += size as usize;
+    //             total_file_data_size += size as usize;
 
-                info.size = size as u32 | compression_bit;
-            }
-        }
+    //             info.size = size as u32 | compression_bit;
+    //         }
+    //     }
 
-        // phase two --- we go back over
-        cx.write.seek(Start(0))?;
+    //     // phase two --- we go back over
+    //     cx.write.seek(Start(0))?;
 
-        let header = HeaderRecord {
-            version: 104,
-            folder_offset: 36,
-            archive_flags: cx.cfg.flags,
-            folder_count: folders.len() as u32,
-            file_count: files.len() as u32,
-            total_folder_name_length: total_folder_name_length as u32,
-            total_file_name_length: total_file_name_length as u32,
-            content_flags: ContentFlags::empty(),
-            padding: 0,
-        };
-        header.write_le(&mut cx.write)?;
+    //     let header = HeaderRecord {
+    //         version: 104,
+    //         folder_offset: 36,
+    //         archive_flags: cx.cfg.flags,
+    //         folder_count: folders.len() as u32,
+    //         file_count: files.len() as u32,
+    //         total_folder_name_length: total_folder_name_length as u32,
+    //         total_file_name_length: total_file_name_length as u32,
+    //         content_flags: ContentFlags::empty(),
+    //         padding: 0,
+    //     };
+    //     header.write_le(&mut cx.write)?;
 
-        for mut info in folders.iter().map(|(_, i, _)| i.clone()) {
-            // you poor, poor thing.
-            info.offset += total_file_name_length as u32;
-            cx.write(info)?;
-        }
+    //     for mut info in folders.iter().map(|(_, i, _)| i.clone()) {
+    //         // you poor, poor thing.
+    //         info.offset += total_file_name_length as u32;
+    //         cx.write(info)?;
+    //     }
 
-        let mut file_idx = 0;
-        for &(_, ref info, name_len) in &folders {
-            cx.write.seek(Current(name_len as i64))?;
+    //     let mut file_idx = 0;
+    //     for (_, info, &name_len) in &folders {
+    //         cx.write.seek(Current(name_len as i64))?;
 
-            let slice = &files[file_idx..][0..info.file_count as usize];
-            for (_, info) in slice {
-                cx.write(info)?;
-            }
+    //         let slice = &files[file_idx..][0..info.file_count as usize];
+    //         for (_, info) in slice {
+    //             cx.write(info)?;
+    //         }
 
-            file_idx += info.file_count as usize;
-        }
+    //         file_idx += info.file_count as usize;
+    //     }
 
-        Ok(())
-    }
+    //     Ok(())
+    // }
 }
 
 mod hash {
@@ -969,5 +989,6 @@ mod hash {
     }
 }
 
-pub use read::read;
-pub use write::{write, write2, Wcfg};
+pub use read::{read, Meta};
+pub use records::HeaderRecord as Header;
+pub use write::{write, Wcfg};
